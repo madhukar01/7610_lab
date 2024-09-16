@@ -1,0 +1,59 @@
+services:
+  peer1:
+    image: lab1-msh:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - mynetwork
+    hostname: "peer1"
+    container_name: "peer1"
+    command: -h hostsfile.txt
+
+  peer2:
+    image: lab1-msh:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - mynetwork
+    hostname: "peer2"
+    container_name: "peer2"
+    command: -h hostsfile.txt
+
+  peer3:
+    image: lab1-msh:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - mynetwork
+    hostname: "peer3"
+    container_name: "peer3"
+    command: -h hostsfile.txt
+
+  peer4:
+    image: lab1-msh:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - mynetwork
+    hostname: "peer4"
+    container_name: "peer4"
+    command: -h hostsfile.txt
+
+  peer5:
+    image: lab1-msh:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - mynetwork
+    hostname: "peer5"
+    container_name: "peer5"
+    command: -h hostsfile.txt
+
+networks:
+  # The presence of these objects is sufficient to define them
+  mynetwork: {}
