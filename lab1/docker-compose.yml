@@ -1,9 +1,6 @@
 services:
   peer1:
-    image: lab1-msh:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: prj1
     networks:
       - mynetwork
     hostname: "peer1"
@@ -11,10 +8,7 @@ services:
     command: -h hostsfile.txt
 
   peer2:
-    image: lab1-msh:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: prj1
     networks:
       - mynetwork
     hostname: "peer2"
@@ -22,10 +16,7 @@ services:
     command: -h hostsfile.txt
 
   peer3:
-    image: lab1-msh:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: prj1
     networks:
       - mynetwork
     hostname: "peer3"
@@ -33,10 +24,7 @@ services:
     command: -h hostsfile.txt
 
   peer4:
-    image: lab1-msh:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: prj1
     networks:
       - mynetwork
     hostname: "peer4"
@@ -44,10 +32,7 @@ services:
     command: -h hostsfile.txt
 
   peer5:
-    image: lab1-msh:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: prj1
     networks:
       - mynetwork
     hostname: "peer5"

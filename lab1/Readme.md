@@ -29,7 +29,8 @@ lab1/
 
 ## Instructions to run the code
 1. Open the terminal in the `lab1/` directory.
-2. Run `docker-compose up --build` to build and run the containers and view the output in the terminal.
+2. Build the docker image using the command `docker build -t prj1 .`
+2. Run `docker compose up` to bring up the containers and view the output in the terminal.
 
 ## Notes
 1. Only `READY` is printed to `stderr`, everything else logged.
