@@ -14,14 +14,15 @@ import (
 
 // Process represents a node in the distributed system
 type Process struct {
-	ID          int
-	State       int
-	Predecessor int
-	Successor   int
-	Connections map[int]net.Conn
-	HasToken    bool
-	mutex       sync.Mutex
-	sleepTime   time.Duration
+	ID           int
+	State        int
+	Predecessor  int
+	Successor    int
+	Connections  map[int]net.Conn
+	HasToken     bool
+	mutex        sync.Mutex
+	sleepTime    time.Duration
+	HostnameToID map[string]int
 }
 
 // printInfo outputs the process information to stderr
@@ -116,10 +117,11 @@ func main() {
 
 	// Initialize the process
 	process := &Process{
-		ID:        processID,
-		State:     0,
-		HasToken:  *hasInitialToken,
-		sleepTime: time.Duration(*sleepTime * float64(time.Second)),
+		ID:           processID,
+		State:        0,
+		HasToken:     *hasInitialToken,
+		sleepTime:    time.Duration(*sleepTime * float64(time.Second)),
+		HostnameToID: make(map[string]int),
 	}
 
 	// Set predecessor and successor IDs
@@ -135,8 +137,7 @@ func main() {
 	}
 
 	// Set up connections to other processes
-	ready := make(chan bool)
-	process.Connections = setupConnections(hosts, processID, ready)
+	process.Connections, process.HostnameToID = setupConnections(hosts, processID)
 
 	// Handle incoming connections - runs in a new goroutine
 	go func() {
@@ -149,9 +150,6 @@ func main() {
 		}
 	}()
 
-	// Wait for all connections to be established
-	<-ready
-
 	// If this process starts with the token, begin token passing
 	if process.HasToken {
 		process.sendToken()
@@ -161,44 +159,37 @@ func main() {
 	select {}
 }
 
-// setupConnections establishes connections with other processes
-func setupConnections(hosts []string, myID int, ready chan<- bool) map[int]net.Conn {
+// setupConnections establishes connections with other processes synchronously
+func setupConnections(hosts []string, myID int) (map[int]net.Conn, map[string]int) {
 	connections := make(map[int]net.Conn)
-	var mutex sync.Mutex
-	var wg sync.WaitGroup
+	hostnameToID := make(map[string]int)
 
 	for i, host := range hosts {
 		if i+1 != myID {
-			wg.Add(1)
-			go func(id int, host string) {
-				defer wg.Done()
-				for {
-					conn, err := net.Dial("tcp", host+":8080")
-					if err == nil {
-						mutex.Lock()
-						connections[id] = conn
-						mutex.Unlock()
-						return
-					}
-					time.Sleep(time.Second) // Wait before retrying
+			for {
+				conn, err := net.Dial("tcp", host+":8080")
+				if err == nil {
+					remoteHostname := getHostnameFromConn(conn)
+					connections[i+1] = conn
+					hostnameToID[remoteHostname] = i + 1
+					break
 				}
-			}(i+1, host)
+				time.Sleep(time.Second) // Wait before retrying
+			}
 		}
 	}
 
-	// Signal when all connections are established
-	go func() {
-		wg.Wait()
-		ready <- true
-	}()
-
-	return connections
+	return connections, hostnameToID
 }
 
 // handleConnection processes incoming messages on a connection
 func handleConnection(conn net.Conn, process *Process) {
 	defer conn.Close()
 	buffer := make([]byte, 1024)
+
+	remoteHostname := getHostnameFromConn(conn)
+	senderID := process.HostnameToID[remoteHostname]
+
 	for {
 		n, err := conn.Read(buffer)
 		if err != nil {
@@ -206,6 +197,7 @@ func handleConnection(conn net.Conn, process *Process) {
 		}
 		message := string(buffer[:n])
 		if message == "TOKEN" {
+			process.printTokenPass(senderID, process.ID)
 			process.processToken()
 		}
 	}
@@ -225,4 +217,20 @@ func readHostsFile(filename string) ([]string, error) {
 		hosts = append(hosts, strings.TrimSpace(scanner.Text()))
 	}
 	return hosts, scanner.Err()
+}
+
+// getHostnameFromConn takes a net.Conn and returns the hostname of the remote endpoint
+func getHostnameFromConn(conn net.Conn) string {
+	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
+	remoteIP := remoteAddr.IP.String()
+
+	// Perform reverse DNS lookup
+	hostnames, err := net.LookupAddr(remoteIP)
+	if err != nil || len(hostnames) == 0 {
+		// Fallback to IP if reverse lookup fails
+		fmt.Println("reverse lookup failed for", remoteIP)
+		return remoteIP
+	}
+	// Use the first returned hostname (without trailing dot)
+	return strings.TrimSuffix(hostnames[0], ".")
 }
