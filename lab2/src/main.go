@@ -7,22 +7,26 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Process represents a node in the distributed system
+// Process represents a node information
 type Process struct {
-	ID           int
-	State        int
-	Predecessor  int
-	Successor    int
-	Connections  map[int]net.Conn
-	HasToken     bool
-	mutex        sync.Mutex
-	sleepTime    time.Duration
-	HostnameToID map[string]int
+	ID              int
+	State           int
+	Predecessor     int
+	Successor       int
+	Connections     map[int]net.Conn
+	HasToken        bool
+	mutex           sync.RWMutex
+	sleepTime       time.Duration
+	HostnameToID    map[string]int
+	Snapshots       map[int]*SnapshotState
+	SnapshotDelay   float64
+	SnapshotTrigger int
 }
 
 // printInfo outputs the process information to stderr
@@ -83,6 +87,9 @@ func main() {
 	hostsFile := flag.String("h", "", "Path to the hostsfile")
 	sleepTime := flag.Float64("t", 0.0, "Sleep time in seconds")
 	hasInitialToken := flag.Bool("x", false, "Whether this process starts with the token")
+	snapshotDelay := flag.Float64("m", 0.0, "Delay before sending markers (in seconds)")
+	snapshotTrigger := flag.Int("s", -1, "State value to trigger snapshot")
+	snapshotID := flag.Int("p", 0, "Snapshot ID")
 	flag.Parse()
 
 	// Validate command-line arguments
@@ -117,11 +124,14 @@ func main() {
 
 	// Initialize the process
 	process := &Process{
-		ID:           processID,
-		State:        0,
-		HasToken:     *hasInitialToken,
-		sleepTime:    time.Duration(*sleepTime * float64(time.Second)),
-		HostnameToID: make(map[string]int),
+		ID:              processID,
+		State:           0,
+		HasToken:        *hasInitialToken,
+		sleepTime:       time.Duration(*sleepTime * float64(time.Second)),
+		HostnameToID:    make(map[string]int),
+		Snapshots:       make(map[int]*SnapshotState),
+		SnapshotDelay:   *snapshotDelay,
+		SnapshotTrigger: *snapshotTrigger,
 	}
 
 	// Set predecessor and successor IDs
@@ -155,11 +165,28 @@ func main() {
 		process.sendToken()
 	}
 
+	// Trigger snapshot if specified
+	if process.SnapshotTrigger >= 0 {
+		go func() {
+			for {
+				process.mutex.RLock()
+				if process.State >= process.SnapshotTrigger {
+					process.mutex.RUnlock()
+					process.initializeSnapshot(*snapshotID)
+					break
+				}
+				process.mutex.RUnlock()
+				time.Sleep(100 * time.Millisecond)
+			}
+		}()
+	}
+
 	// Keep the main goroutine running
 	select {}
 }
 
-// setupConnections establishes connections with other processes synchronously
+// setupConnections establishes connections with other processes
+// resolves the host names from hostsfile into hostnames on the network
 func setupConnections(hosts []string, myID int) (map[int]net.Conn, map[string]int) {
 	connections := make(map[int]net.Conn)
 	hostnameToID := make(map[string]int)
@@ -195,10 +222,20 @@ func handleConnection(conn net.Conn, process *Process) {
 		if err != nil {
 			return // Silently handle connection errors
 		}
+
 		message := string(buffer[:n])
 		if message == "TOKEN" {
 			process.printTokenPass(senderID, process.ID)
+			process.recordMessage(senderID, "TOKEN")
 			process.processToken()
+		} else if strings.HasPrefix(message, "MARKER") {
+			parts := strings.Split(message, " ")
+			if len(parts) == 2 {
+				snapshotID, _ := strconv.Atoi(parts[1])
+				process.handleMarker(senderID, snapshotID)
+			}
+		} else {
+			log.Fatal("Invalid message received: ", message)
 		}
 	}
 }
@@ -219,7 +256,7 @@ func readHostsFile(filename string) ([]string, error) {
 	return hosts, scanner.Err()
 }
 
-// getHostnameFromConn takes a net.Conn and returns the hostname of the remote endpoint
+// getHostnameFromConn fetches the hostname of the remote endpoint
 func getHostnameFromConn(conn net.Conn) string {
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	remoteIP := remoteAddr.IP.String()
@@ -231,6 +268,6 @@ func getHostnameFromConn(conn net.Conn) string {
 		fmt.Println("reverse lookup failed for", remoteIP)
 		return remoteIP
 	}
-	// Use the first returned hostname (without trailing dot)
+	// Use the first returned hostname
 	return strings.TrimSuffix(hostnames[0], ".")
 }
