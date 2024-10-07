@@ -2,15 +2,22 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+)
+
+// Constants for message types
+const (
+	TOKEN_MSG   = 1
+	MARKER_MSG  = 2
+	MARKER_BITS = 2 // Number of bits used for message type
 )
 
 // Process represents a node information
@@ -57,7 +64,8 @@ func (p *Process) sendToken() {
 
 		if ok {
 			p.printTokenPass(p.ID, p.Successor)
-			_, err := conn.Write([]byte("TOKEN"))
+			packedMsg := packMessage(TOKEN_MSG, 0) // Token message with no snapshot ID
+			err := binary.Write(conn, binary.BigEndian, packedMsg)
 			if err == nil {
 				return // Token sent successfully
 			}
@@ -212,30 +220,29 @@ func setupConnections(hosts []string, myID int) (map[int]net.Conn, map[string]in
 // handleConnection processes incoming messages on a connection
 func handleConnection(conn net.Conn, process *Process) {
 	defer conn.Close()
-	buffer := make([]byte, 1024)
 
 	remoteHostname := getHostnameFromConn(conn)
 	senderID := process.HostnameToID[remoteHostname]
 
 	for {
-		n, err := conn.Read(buffer)
+		var packedMsg int32
+		err := binary.Read(conn, binary.BigEndian, &packedMsg)
 		if err != nil {
 			return // Silently handle connection errors
 		}
 
-		message := string(buffer[:n])
-		if message == "TOKEN" {
+		msgType, snapshotID := unpackMessage(packedMsg)
+		// fmt.Fprintf(os.Stderr, "Unpacked message: msgType = %d, snapshotID = %d\n", msgType, snapshotID)
+
+		switch msgType {
+		case TOKEN_MSG:
 			process.printTokenPass(senderID, process.ID)
 			process.recordMessage(senderID, "TOKEN")
 			process.processToken()
-		} else if strings.HasPrefix(message, "MARKER") {
-			parts := strings.Split(message, " ")
-			if len(parts) == 2 {
-				snapshotID, _ := strconv.Atoi(parts[1])
-				process.handleMarker(senderID, snapshotID)
-			}
-		} else {
-			log.Fatal("Invalid message received: ", message)
+		case MARKER_MSG:
+			process.handleMarker(senderID, snapshotID)
+		default:
+			fmt.Fprintf(os.Stderr, "Invalid message received: %d\n", packedMsg)
 		}
 	}
 }
@@ -270,4 +277,16 @@ func getHostnameFromConn(conn net.Conn) string {
 	}
 	// Use the first returned hostname
 	return strings.TrimSuffix(hostnames[0], ".")
+}
+
+// unpackMessage extracts message type and snapshot ID from a single int32
+func unpackMessage(packedMsg int32) (msgType, snapshotID int) {
+	msgType = int((uint32(packedMsg) >> 30) & 0x3)
+	snapshotID = int(packedMsg & 0x3FFFFFFF)
+	return
+}
+
+// packMessage combines message type and snapshot ID into a single int32
+func packMessage(msgType, snapshotID int) int32 {
+	return int32((msgType << 30) | (snapshotID & 0x3FFFFFFF))
 }

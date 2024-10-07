@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"sync"
@@ -77,9 +78,9 @@ func (p *Process) sendMarkers(snapshotID int) {
 	defer p.mutex.RUnlock()
 
 	// Iterate over all connections and send marker messages
+	packedMsg := packMessage(MARKER_MSG, snapshotID)
 	for id, conn := range p.Connections {
-		markerMsg := fmt.Sprintf("MARKER %d", snapshotID)
-		_, err := conn.Write([]byte(markerMsg))
+		err := binary.Write(conn, binary.BigEndian, packedMsg)
 		if err == nil {
 			hasTokenStr := "NO"
 			if p.HasToken {
