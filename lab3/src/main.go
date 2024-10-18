@@ -51,14 +51,26 @@ type Message struct {
 }
 
 var (
-	membership    *Membership
-	allKnownHosts []string
-	hostnameToID  map[string]int
-	idToHostname  map[int]string
-	myID          int
-	isLeader      bool
-	leaderID      int
+	membership      *Membership
+	allKnownHosts   []string
+	hostnameToID    map[string]int
+	idToHostname    map[int]string
+	myID            int
+	isLeader        bool
+	leaderID        int
+	lastHeartbeat   map[int]time.Time
+	heartbeatMu     sync.Mutex
+	removalRequests chan int = make(chan int, 10) // Buffer for removal requests
 )
+
+const (
+	HEARTBEAT_INTERVAL = 2 * time.Second
+	FAILURE_TIMEOUT    = 2 * HEARTBEAT_INTERVAL
+)
+
+type HeartbeatMessage struct {
+	PeerID int
+}
 
 func (m *Membership) updateMembership(alivePeers []Peer) {
 	m.mu.Lock()
@@ -91,6 +103,7 @@ func main() {
 	// Define and parse command-line flags
 	hostfile := flag.String("h", "hostsfile.txt", "Path to the hostfile")
 	delay := flag.Int("d", 0, "Delay in seconds before starting the protocol")
+	crashDelay := flag.Int("c", 0, "Delay in seconds before crashing after joining")
 	flag.Parse()
 
 	// Read hosts from file
@@ -113,7 +126,7 @@ func main() {
 	hostname, _ := os.Hostname()
 	myID = hostnameToID[hostname]
 	if myID == 0 {
-		fmt.Println("Error: This host is not in the hostfile")
+		log.Fatal("Error: This host is not in the hostfile")
 		return
 	}
 	isLeader = (myID == 1)
@@ -124,6 +137,9 @@ func main() {
 		ViewID: 0,
 		Peers:  make([]Peer, 0),
 	}
+
+	// Initialize lastHeartbeat map
+	lastHeartbeat = make(map[int]time.Time)
 
 	// Sleep for the specified delay
 	time.Sleep(time.Duration(*delay) * time.Second)
@@ -138,11 +154,18 @@ func main() {
 		printMembershipUpdate()
 		go leaderLoop()
 	} else {
-		go joinGroup()
+		go joinGroup(*crashDelay)
 	}
 
 	// Start listening for incoming messages
 	go listenForMessages()
+
+	// Start heartbeat sender and listener
+	go sendHeartbeats()
+	go listenHeartbeats()
+
+	// Start failure detector
+	go failureDetector()
 
 	// Keep the program running
 	select {}
@@ -173,11 +196,82 @@ func leaderLoop() {
 		select {
 		case joinRequest := <-joinRequests:
 			handleJoinRequest(joinRequest.PeerID)
-		case <-time.After(5 * time.Second):
-			// Periodic membership check (simplified)
-			checkMembership()
+		case removalRequest := <-removalRequests:
+			if isLeader {
+				go initiateRemovePeer(removalRequest)
+			}
+		case <-time.After(HEARTBEAT_INTERVAL):
+			// Any other periodic tasks
 		}
 	}
+}
+
+func initiateRemovePeer(peerID int) {
+	if !isLeader {
+		return
+	}
+
+	reqID := generateRequestID()
+	viewID := membership.ViewID
+
+	okResponses := make(chan bool, len(membership.Peers))
+	activePeers := 0
+
+	membership.mu.Lock()
+	for _, peer := range membership.Peers {
+		if peer.ID != myID && peer.IsAlive && peer.ID != peerID {
+			activePeers++
+			go func(p Peer) {
+				ok := sendReqMessage(p, reqID, viewID, DELETE, peerID)
+				okResponses <- ok
+			}(peer)
+		}
+	}
+	membership.mu.Unlock()
+
+	// Wait for OK messages
+	timeout := time.After(5 * time.Second)
+	okCount := 0
+	for i := 0; i < activePeers; i++ {
+		select {
+		case ok := <-okResponses:
+			if ok {
+				okCount++
+			}
+		case <-timeout:
+			return
+		}
+	}
+
+	if okCount < activePeers/2 {
+		return
+	}
+
+	removePeerAndSendNewView(peerID)
+}
+
+func removePeerAndSendNewView(peerID int) {
+	membership.mu.Lock()
+	defer membership.mu.Unlock()
+
+	newViewID := membership.ViewID + 1
+	var updatedPeers []Peer
+	for _, peer := range membership.Peers {
+		if peer.ID != peerID {
+			updatedPeers = append(updatedPeers, peer)
+		}
+	}
+
+	membership.ViewID = newViewID
+	membership.Peers = updatedPeers
+
+	for _, peer := range updatedPeers {
+		if peer.ID != myID {
+			sendNewViewMessage(peer, newViewID, updatedPeers)
+		}
+	}
+
+	printMembershipUpdate()
 }
 
 func handleJoinRequest(peerID int) {
@@ -205,13 +299,11 @@ func handleJoinRequest(peerID int) {
 				okCount++
 			}
 		case <-timeout:
-			fmt.Println("Timeout waiting for OK messages")
 			return
 		}
 	}
 
 	if okCount < (len(membership.Peers)-1)/2 {
-		fmt.Println("Did not receive majority of OK messages")
 		return
 	}
 
@@ -221,6 +313,11 @@ func handleJoinRequest(peerID int) {
 	updatedPeers := append(membership.Peers, newPeer)
 
 	membership.updateMembership(updatedPeers)
+
+	// Reset heartbeat for the new peer
+	heartbeatMu.Lock()
+	lastHeartbeat[peerID] = time.Now()
+	heartbeatMu.Unlock()
 
 	// Send NEWVIEW to all members including the new one
 	for _, peer := range updatedPeers {
@@ -233,7 +330,7 @@ func handleJoinRequest(peerID int) {
 func sendReqMessage(peer Peer, reqID, viewID int, operation int, peerID int) bool {
 	conn, err := net.Dial("tcp", peer.Hostname+":8080")
 	if err != nil {
-		fmt.Println("Error connecting to peer:", err)
+		// fmt.Println("Error connecting to peer:", err)
 		return false
 	}
 	defer conn.Close()
@@ -319,8 +416,8 @@ func handleConnection(conn net.Conn) {
 }
 
 func handleReqMessage(msg Message, conn net.Conn) {
-	// Save the operation (simplified; should use a proper data structure in a real implementation)
-	fmt.Printf("Received REQ: RequestID=%d, ViewID=%d, Operation=%d, PeerID=%d\n", msg.RequestID, msg.ViewID, msg.Operation, msg.PeerID)
+	fmt.Printf("Received REQ: RequestID=%d, ViewID=%d, Operation=%d, PeerID=%d\n",
+		msg.RequestID, msg.ViewID, msg.Operation, msg.PeerID)
 
 	// Send OK message back to the leader
 	okMsg := Message{
@@ -344,13 +441,26 @@ func handleNewViewMessage(msg Message) {
 	defer membership.mu.Unlock()
 
 	if msg.ViewID <= membership.ViewID {
-		fmt.Println("Received outdated or duplicate NEWVIEW message")
 		return
 	}
 
 	membership.ViewID = msg.ViewID
 	if msg.Peers != nil {
 		membership.Peers = msg.Peers
+		// Reset lastHeartbeat for the new membership
+		heartbeatMu.Lock()
+		newLastHeartbeat := make(map[int]time.Time)
+		for _, peer := range membership.Peers {
+			if peer.ID != myID && peer.IsAlive {
+				if lastBeat, ok := lastHeartbeat[peer.ID]; ok {
+					newLastHeartbeat[peer.ID] = lastBeat
+				} else {
+					newLastHeartbeat[peer.ID] = time.Now()
+				}
+			}
+		}
+		lastHeartbeat = newLastHeartbeat
+		heartbeatMu.Unlock()
 	}
 
 	printMembershipUpdate()
@@ -360,24 +470,9 @@ func generateRequestID() int {
 	return int(time.Now().UnixNano())
 }
 
-func checkMembership() {
-	// Simplified membership check (ping all peers)
-	for _, peer := range membership.Peers {
-		if peer.ID != myID {
-			conn, err := net.DialTimeout("tcp", peer.Hostname+":8080", time.Second)
-			if err != nil {
-				fmt.Printf("Peer %d (%s) is unreachable\n", peer.ID, peer.Hostname)
-				// In a real implementation, you would initiate a protocol to remove this peer
-			} else {
-				conn.Close()
-			}
-		}
-	}
-}
-
 var joinRequests = make(chan Message, 10) // Buffer for join requests
 
-func joinGroup() {
+func joinGroup(crashDelay int) {
 	leaderAddr := allKnownHosts[0] + ":8080"
 	conn, err := net.Dial("tcp", leaderAddr)
 	if err != nil {
@@ -391,6 +486,12 @@ func joinGroup() {
 		PeerID: myID,
 	}
 	sendMessage(conn, joinMsg)
+
+	if crashDelay > 0 {
+		fmt.Printf("Will crash in %d seconds...\n", crashDelay)
+		time.Sleep(time.Duration(crashDelay) * time.Second)
+		crash()
+	}
 }
 
 func listenForMessages() {
@@ -409,4 +510,94 @@ func listenForMessages() {
 		}
 		go handleConnection(conn)
 	}
+}
+
+func sendHeartbeats() {
+	for {
+		membership.mu.Lock()
+		for _, peer := range membership.Peers {
+			if peer.ID != myID && peer.IsAlive {
+				go sendHeartbeat(peer)
+			}
+		}
+		membership.mu.Unlock()
+		time.Sleep(HEARTBEAT_INTERVAL)
+	}
+}
+
+func sendHeartbeat(peer Peer) {
+	conn, err := net.Dial("udp", peer.Hostname+":8081")
+	if err != nil {
+		// fmt.Printf("Error connecting to peer %d for heartbeat: %v\n", peer.ID, err)
+		return
+	}
+	defer conn.Close()
+
+	heartbeat := HeartbeatMessage{
+		PeerID: myID,
+	}
+
+	encoder := json.NewEncoder(conn)
+	err = encoder.Encode(heartbeat)
+	if err != nil {
+		fmt.Printf("Error sending heartbeat to peer %d: %v\n", peer.ID, err)
+	}
+}
+
+func listenHeartbeats() {
+	addr, err := net.ResolveUDPAddr("udp", ":8081")
+	if err != nil {
+		fmt.Println("Error resolving UDP address:", err)
+		return
+	}
+
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		fmt.Println("Error listening for heartbeats:", err)
+		return
+	}
+	defer conn.Close()
+
+	for {
+		var heartbeat HeartbeatMessage
+		decoder := json.NewDecoder(conn)
+		err := decoder.Decode(&heartbeat)
+		if err != nil {
+			fmt.Println("Error receiving heartbeat:", err)
+			continue
+		}
+
+		heartbeatMu.Lock()
+		lastHeartbeat[heartbeat.PeerID] = time.Now()
+		heartbeatMu.Unlock()
+	}
+}
+
+func failureDetector() {
+	for {
+		time.Sleep(HEARTBEAT_INTERVAL)
+
+		membership.mu.Lock()
+		heartbeatMu.Lock()
+		for _, peer := range membership.Peers {
+			if peer.ID != myID && peer.IsAlive {
+				lastBeat, ok := lastHeartbeat[peer.ID]
+				if ok && time.Since(lastBeat) > FAILURE_TIMEOUT {
+					if isLeader {
+						removalRequests <- peer.ID
+					}
+					fmt.Printf("{peer_id:%d, view_id: %d, leader: %d, message:\"peer %d unreachable\"}\n",
+						myID, membership.ViewID, leaderID, peer.ID)
+				}
+			}
+		}
+		heartbeatMu.Unlock()
+		membership.mu.Unlock()
+	}
+}
+
+func crash() {
+	fmt.Printf("{peer_id:%d, view_id: %d, leader: %d, message:\"crashing\"}\n",
+		myID, membership.ViewID, leaderID)
+	os.Exit(0)
 }

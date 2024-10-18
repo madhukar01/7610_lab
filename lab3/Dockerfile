@@ -8,6 +8,6 @@ RUN go mod download
 
 RUN go build -o /app/main
 
-EXPOSE 8080
+EXPOSE 8080 8081
 
 ENTRYPOINT ["/app/main"]
