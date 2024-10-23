@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"math"
 	"net"
 	"os"
 	"sort"
@@ -15,32 +15,38 @@ import (
 	"time"
 )
 
-// Message types
+// Constants for message types
 const (
-	JOIN    = 1
-	REQ     = 2
-	OK      = 3
-	NEWVIEW = 4
+	JOIN      = 1
+	REQ       = 2
+	OK        = 3
+	NEWVIEW   = 4
+	NEWLEADER = 5
 )
 
-// Operation types
+// Constants for operation types
 const (
-	ADD    = 1
-	DELETE = 2
+	ADD     = 1
+	DELETE  = 2
+	PENDING = 3
+	NOTHING = 4
 )
 
+// Peer represents a node in the membership
 type Peer struct {
 	ID       int
 	Hostname string
 	IsAlive  bool
 }
 
+// Membership represents the current view of the group
 type Membership struct {
 	ViewID int
 	Peers  []Peer
 	mu     sync.Mutex
 }
 
+// Message represents the structure of messages exchanged between peers
 type Message struct {
 	Type      int // JOIN, REQ, OK, NEWVIEW
 	RequestID int
@@ -51,16 +57,18 @@ type Message struct {
 }
 
 var (
-	membership      *Membership
-	allKnownHosts   []string
-	hostnameToID    map[string]int
-	idToHostname    map[int]string
-	myID            int
-	isLeader        bool
-	leaderID        int
-	lastHeartbeat   map[int]time.Time
-	heartbeatMu     sync.Mutex
-	removalRequests chan int = make(chan int, 10) // Buffer for removal requests
+	membership       *Membership
+	allKnownHosts    []string
+	hostnameToID     map[string]int
+	idToHostname     map[int]string
+	myID             int
+	isLeader         bool
+	leaderID         int
+	lastHeartbeat    map[int]time.Time
+	heartbeatMu      sync.Mutex
+	removalRequests  chan int = make(chan int, 10) // Buffer for removal requests
+	pendingOperation *Message
+	leaderCrash      bool
 )
 
 const (
@@ -88,6 +96,7 @@ func (m *Membership) updateMembership(alivePeers []Peer) {
 	printMembershipUpdate()
 }
 
+// printMembershipUpdate outputs the current membership state
 func printMembershipUpdate() {
 	var memberList []string
 	for _, peer := range membership.Peers {
@@ -95,22 +104,24 @@ func printMembershipUpdate() {
 			memberList = append(memberList, fmt.Sprintf("%d", peer.ID))
 		}
 	}
-	fmt.Printf("{peer_id: %d, view_id: %d, leader: %d, memb_list: [%s]}\n",
+	fmt.Fprintf(os.Stderr, "{peer_id: %d, view_id: %d, leader: %d, memb_list: [%s]}\n",
 		myID, membership.ViewID, leaderID, strings.Join(memberList, ","))
 }
 
+// main is the entry point of the program
 func main() {
-	// Define and parse command-line flags
+	// Parse command-line flags
 	hostfile := flag.String("h", "hostsfile.txt", "Path to the hostfile")
 	delay := flag.Int("d", 0, "Delay in seconds before starting the protocol")
 	crashDelay := flag.Int("c", 0, "Delay in seconds before crashing after joining")
+	leaderCrash := flag.Bool("t", false, "Enable leader crash simulation")
 	flag.Parse()
 
 	// Read hosts from file
 	var err error
 	allKnownHosts, err = readHostsFile(*hostfile)
 	if err != nil {
-		log.Fatal("Error reading hosts file:", err)
+		fmt.Fprintf(os.Stderr, "Error reading hosts file: %v\n", err)
 		return
 	}
 
@@ -126,7 +137,7 @@ func main() {
 	hostname, _ := os.Hostname()
 	myID = hostnameToID[hostname]
 	if myID == 0 {
-		log.Fatal("Error: This host is not in the hostfile")
+		fmt.Fprintf(os.Stderr, "Error: This host is not in the hostfile\n")
 		return
 	}
 	isLeader = (myID == 1)
@@ -143,6 +154,10 @@ func main() {
 
 	// Sleep for the specified delay
 	time.Sleep(time.Duration(*delay) * time.Second)
+
+	if isLeader && *leaderCrash {
+		go runLeaderCrash()
+	}
 
 	if isLeader {
 		// Leader starts with itself in the membership list
@@ -274,6 +289,7 @@ func removePeerAndSendNewView(peerID int) {
 	printMembershipUpdate()
 }
 
+// handleJoinRequest processes a join request from a new peer
 func handleJoinRequest(peerID int) {
 	reqID := generateRequestID()
 	viewID := membership.ViewID
@@ -344,14 +360,14 @@ func sendReqMessage(peer Peer, reqID, viewID int, operation int, peerID int) boo
 	}
 	err = sendMessage(conn, reqMsg)
 	if err != nil {
-		fmt.Println("Error sending REQ message:", err)
+		// fmt.Println("Error sending REQ message:", err)
 		return false
 	}
 
 	// Wait for OK response
 	response, err := receiveMessage(conn)
 	if err != nil {
-		fmt.Println("Error receiving OK message:", err)
+		// fmt.Println("Error receiving OK message:", err)
 		return false
 	}
 
@@ -361,7 +377,7 @@ func sendReqMessage(peer Peer, reqID, viewID int, operation int, peerID int) boo
 func sendNewViewMessage(peer Peer, newViewID int, peers []Peer) {
 	conn, err := net.Dial("tcp", peer.Hostname+":8080")
 	if err != nil {
-		fmt.Println("Error connecting to peer:", err)
+		// fmt.Println("Error connecting to peer:", err)
 		return
 	}
 	defer conn.Close()
@@ -371,10 +387,7 @@ func sendNewViewMessage(peer Peer, newViewID int, peers []Peer) {
 		ViewID: newViewID,
 		Peers:  peers,
 	}
-	err = sendMessage(conn, newViewMsg)
-	if err != nil {
-		fmt.Println("Error sending NEWVIEW message:", err)
-	}
+	sendMessage(conn, newViewMsg)
 }
 
 func sendMessage(conn net.Conn, msg Message) error {
@@ -394,7 +407,7 @@ func handleConnection(conn net.Conn) {
 	msg, err := receiveMessage(conn)
 	if err != nil {
 		if err != io.EOF {
-			fmt.Println("Error receiving message:", err)
+			fmt.Fprintf(os.Stderr, "Error receiving message: %v\n", err)
 		}
 		return
 	}
@@ -412,12 +425,14 @@ func handleConnection(conn net.Conn) {
 		}
 	case NEWVIEW:
 		handleNewViewMessage(msg)
+	case NEWLEADER:
+		handleNewLeaderMessage(msg, conn)
 	}
 }
 
 func handleReqMessage(msg Message, conn net.Conn) {
-	fmt.Printf("Received REQ: RequestID=%d, ViewID=%d, Operation=%d, PeerID=%d\n",
-		msg.RequestID, msg.ViewID, msg.Operation, msg.PeerID)
+	// fmt.Fprintf(os.Stderr, "Received REQ: RequestID=%d, ViewID=%d, Operation=%d, PeerID=%d\n",
+	// 	msg.RequestID, msg.ViewID, msg.Operation, msg.PeerID)
 
 	// Send OK message back to the leader
 	okMsg := Message{
@@ -425,15 +440,15 @@ func handleReqMessage(msg Message, conn net.Conn) {
 		RequestID: msg.RequestID,
 		ViewID:    msg.ViewID,
 	}
-	err := sendMessage(conn, okMsg)
-	if err != nil {
-		fmt.Println("Error sending OK message:", err)
-	}
+	sendMessage(conn, okMsg)
+
+	pendingOperation = &msg
 }
 
 func handleOkMessage(msg Message) {
-	// Process OK message (simplified; should use a proper tracking mechanism in a real implementation)
-	fmt.Printf("Received OK: RequestID=%d, ViewID=%d\n", msg.RequestID, msg.ViewID)
+	// OK messages that are received when the leader is not expecting them are ignored
+	// OK responses for REQ messages are handled separately
+	// fmt.Printf("Received OK: RequestID=%d, ViewID=%d\n", msg.RequestID, msg.ViewID)
 }
 
 func handleNewViewMessage(msg Message) {
@@ -463,6 +478,7 @@ func handleNewViewMessage(msg Message) {
 		heartbeatMu.Unlock()
 	}
 
+	pendingOperation = nil
 	printMembershipUpdate()
 }
 
@@ -476,7 +492,6 @@ func joinGroup(crashDelay int) {
 	leaderAddr := allKnownHosts[0] + ":8080"
 	conn, err := net.Dial("tcp", leaderAddr)
 	if err != nil {
-		fmt.Println("Error connecting to leader:", err)
 		return
 	}
 	defer conn.Close()
@@ -488,7 +503,6 @@ func joinGroup(crashDelay int) {
 	sendMessage(conn, joinMsg)
 
 	if crashDelay > 0 {
-		fmt.Printf("Will crash in %d seconds...\n", crashDelay)
 		time.Sleep(time.Duration(crashDelay) * time.Second)
 		crash()
 	}
@@ -497,7 +511,7 @@ func joinGroup(crashDelay int) {
 func listenForMessages() {
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
-		fmt.Println("Error starting listener:", err)
+		fmt.Fprintf(os.Stderr, "Error starting listener: %v\n", err)
 		return
 	}
 	defer listener.Close()
@@ -505,7 +519,7 @@ func listenForMessages() {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("Error accepting connection:", err)
+			fmt.Fprintf(os.Stderr, "Error accepting connection: %v\n", err)
 			continue
 		}
 		go handleConnection(conn)
@@ -540,20 +554,20 @@ func sendHeartbeat(peer Peer) {
 	encoder := json.NewEncoder(conn)
 	err = encoder.Encode(heartbeat)
 	if err != nil {
-		fmt.Printf("Error sending heartbeat to peer %d: %v\n", peer.ID, err)
+		// fmt.Printf("Error sending heartbeat to peer %d: %v\n", peer.ID, err)
 	}
 }
 
 func listenHeartbeats() {
 	addr, err := net.ResolveUDPAddr("udp", ":8081")
 	if err != nil {
-		fmt.Println("Error resolving UDP address:", err)
+		// fmt.Println("Error resolving UDP address:", err)
 		return
 	}
 
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		fmt.Println("Error listening for heartbeats:", err)
+		// fmt.Println("Error listening for heartbeats:", err)
 		return
 	}
 	defer conn.Close()
@@ -563,7 +577,7 @@ func listenHeartbeats() {
 		decoder := json.NewDecoder(conn)
 		err := decoder.Decode(&heartbeat)
 		if err != nil {
-			fmt.Println("Error receiving heartbeat:", err)
+			// fmt.Println("Error receiving heartbeat:", err)
 			continue
 		}
 
@@ -573,6 +587,7 @@ func listenHeartbeats() {
 	}
 }
 
+// failureDetector periodically checks for unreachable peers
 func failureDetector() {
 	for {
 		time.Sleep(HEARTBEAT_INTERVAL)
@@ -583,11 +598,17 @@ func failureDetector() {
 			if peer.ID != myID && peer.IsAlive {
 				lastBeat, ok := lastHeartbeat[peer.ID]
 				if ok && time.Since(lastBeat) > FAILURE_TIMEOUT {
-					if isLeader {
-						removalRequests <- peer.ID
+					if peer.ID == leaderID {
+						fmt.Fprintf(os.Stderr, "{peer_id:%d, view_id: %d, leader: %d, message:\"peer %d (leader) unreachable\"}\n",
+							myID, membership.ViewID, leaderID, peer.ID)
+						handleLeaderFailure()
+					} else {
+						fmt.Fprintf(os.Stderr, "{peer_id:%d, view_id: %d, leader: %d, message:\"peer %d unreachable\"}\n",
+							myID, membership.ViewID, leaderID, peer.ID)
+						if isLeader {
+							removalRequests <- peer.ID
+						}
 					}
-					fmt.Printf("{peer_id:%d, view_id: %d, leader: %d, message:\"peer %d unreachable\"}\n",
-						myID, membership.ViewID, leaderID, peer.ID)
 				}
 			}
 		}
@@ -597,7 +618,155 @@ func failureDetector() {
 }
 
 func crash() {
-	fmt.Printf("{peer_id:%d, view_id: %d, leader: %d, message:\"crashing\"}\n",
+	fmt.Fprintf(os.Stderr, "{peer_id:%d, view_id: %d, leader: %d, message:\"crashing\"}\n",
 		myID, membership.ViewID, leaderID)
 	os.Exit(0)
+}
+
+func runLeaderCrash() {
+	// Wait for all hosts to join
+	for len(membership.Peers) < len(allKnownHosts) {
+		time.Sleep(time.Second)
+	}
+
+	// Send REQ message to all hosts except the next leader
+	nextLeaderID := findNextLeaderID()
+	reqID := generateRequestID()
+	viewID := membership.ViewID
+	peerToRemove := membership.Peers[len(membership.Peers)-1].ID
+
+	for _, peer := range membership.Peers {
+		if peer.ID != myID && peer.ID != nextLeaderID {
+			sendReqMessage(peer, reqID, viewID, DELETE, peerToRemove)
+		}
+	}
+
+	// Crash the leader
+	crash()
+}
+
+func findNextLeaderID() int {
+	minID := math.MaxInt32
+	for _, peer := range membership.Peers {
+		if peer.ID != leaderID && peer.IsAlive && peer.ID < minID {
+			minID = peer.ID
+		}
+	}
+	return minID
+}
+
+// handleLeaderFailure manages the process of electing a new leader
+func handleLeaderFailure() {
+	nextLeaderID := findNextLeaderID()
+	if myID == nextLeaderID {
+		isLeader = true
+		leaderID = myID
+		// fmt.Printf("Becoming new leader: {peer_id: %d, view_id: %d, leader: %d}\n", myID, membership.ViewID, leaderID)
+
+		// Start leader responsibilities
+		go leaderLoop()
+		go initiateReconciliation()
+	} else {
+		leaderID = nextLeaderID
+		// fmt.Printf("New leader elected: {peer_id: %d, view_id: %d, leader: %d}\n", myID, membership.ViewID, leaderID)
+	}
+}
+
+// initiateReconciliation handles pending operations after a new leader is elected
+func initiateReconciliation() {
+	reqID := generateRequestID()
+	viewID := membership.ViewID
+
+	responses := make(chan Message, len(membership.Peers))
+	for _, peer := range membership.Peers {
+		if peer.ID != myID && peer.IsAlive {
+			go func(p Peer) {
+				resp := sendNewLeaderMessage(p, reqID, viewID)
+				responses <- resp
+			}(peer)
+		}
+	}
+
+	timeout := time.After(5 * time.Second)
+	pendingOps := make([]Message, 0)
+
+	for i := 0; i < len(membership.Peers)-1; i++ {
+		select {
+		case resp := <-responses:
+			if resp.Operation != NOTHING {
+				pendingOps = append(pendingOps, resp)
+			}
+		case <-timeout:
+			// fmt.Println("Timeout waiting for NEWLEADER responses")
+			return
+		}
+	}
+
+	if len(pendingOps) > 0 {
+		// Handle the pending operation (assuming only one)
+		op := pendingOps[0]
+		if op.Operation == ADD {
+			handleJoinRequest(op.PeerID)
+		} else if op.Operation == DELETE {
+			initiateRemovePeer(op.PeerID)
+		}
+	}
+
+	// Update view ID and broadcast new view
+	membership.mu.Lock()
+	membership.ViewID++
+	newViewID := membership.ViewID
+	membership.mu.Unlock()
+
+	for _, peer := range membership.Peers {
+		if peer.ID != myID && peer.IsAlive {
+			sendNewViewMessage(peer, newViewID, membership.Peers)
+		}
+	}
+
+	printMembershipUpdate()
+}
+
+func sendNewLeaderMessage(peer Peer, reqID, viewID int) Message {
+	conn, err := net.Dial("tcp", peer.Hostname+":8080")
+	if err != nil {
+		// fmt.Println("Error connecting to peer:", err)
+		return Message{}
+	}
+	defer conn.Close()
+
+	newLeaderMsg := Message{
+		Type:      NEWLEADER,
+		RequestID: reqID,
+		ViewID:    viewID,
+		Operation: PENDING,
+	}
+	err = sendMessage(conn, newLeaderMsg)
+	if err != nil {
+		// fmt.Println("Error sending NEWLEADER message:", err)
+		return Message{}
+	}
+
+	response, err := receiveMessage(conn)
+	if err != nil {
+		// fmt.Println("Error receiving response to NEWLEADER:", err)
+		return Message{}
+	}
+
+	return response
+}
+
+func handleNewLeaderMessage(msg Message, conn net.Conn) {
+	var response Message
+	if pendingOperation != nil {
+		response = *pendingOperation
+	} else {
+		response = Message{
+			Type:      OK,
+			RequestID: msg.RequestID,
+			ViewID:    msg.ViewID,
+			Operation: NOTHING,
+		}
+	}
+	sendMessage(conn, response)
 }

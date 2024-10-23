@@ -1,4 +1,4 @@
-## CS 7610: Lab 2
+## CS 7610: Lab 3
 - Name: Madhukara S Holla
 - Email: sholla.m@northeastern.edu
 
@@ -7,7 +7,6 @@
 lab2/
 ├── src/
 │   ├── main.go
-│   ├── snapshot.go
 │   ├── hostsfile.txt
 │   ├── go.mod
 ├── Dockerfile
@@ -18,13 +17,12 @@ lab2/
 
 ```
 - `src/` contains the source code.
-    - `src/main.go` contains the main function with token passing and connection setup.
-    - `src/snapshot.go` contains the snapshot logic.
+    - `src/main.go` contains the main function with membership protocol.
     - `src/hostsfile.txt` is the hosts file.
 - `docker-compose-testcase-*.yml` docker compose file for running the containers for the testcases.
 - `Dockerfile` is the Dockerfile to build the docker image.
 
 ## Instructions to run the code
-1. Open the terminal in the `lab2/` directory.
-2. Build the docker image using the command `docker build -t prj2 .`
+1. Open the terminal in the `lab3/` directory.
+2. Build the docker image using the command `docker build -t prj3 .`
 3. Run `docker compose -f <compose file> up` to bring up the containers and view the output in the terminal.
