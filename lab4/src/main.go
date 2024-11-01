@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ type Message struct {
 
 type Peer struct {
 	ID               int
+	ProposerNum      int
 	Roles            []string
 	MinProposal      int
 	AcceptedValue    string
@@ -31,48 +33,52 @@ type Peer struct {
 	ProposedValue    string
 	Connections      map[string]net.Conn
 	mutex            sync.Mutex
-	prepareResponses map[int]map[int]Message // map[proposalNum]map[peerID]response
+	prepareResponses map[int]map[int]Message
 	acceptResponses  map[int]map[int]Message
 	numAcceptors     int
 	PeerRoles        map[string][]string
 	hasChosen        bool
+	acceptSent       map[int]bool
 }
 
 func main() {
 	// Parse command line arguments
 	hostsFile := flag.String("h", "", "Path to hosts file")
 	value := flag.String("v", "", "Proposed value")
-	// delay := flag.Int("t", 0, "Delay for proposer 2")
+	delay := flag.Float64("t", 0, "Delay for secondary proposer (in seconds)")
 	flag.Parse()
 
 	if *hostsFile == "" {
-		fmt.Println("Hosts file is required")
+		fmt.Fprintf(os.Stderr, "Hosts file is required\n")
 		os.Exit(1)
 	}
 
 	// Read and parse hosts file
 	hosts, err := parseHostsFile(*hostsFile)
 	if err != nil {
-		fmt.Printf("Error parsing hosts file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error parsing hosts file: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Get hostname
 	hostname, err := os.Hostname()
 	if err != nil {
-		fmt.Printf("Error getting hostname: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error getting hostname: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Initialize peer
+	// Initialize peer with proposer number instead of peer ID for proposals
+	proposerNum := getProposerNumber(hosts[hostname])
 	peer := &Peer{
 		ID:               getPeerID(hostname, hosts),
 		Roles:            hosts[hostname],
+		ProposerNum:      proposerNum,
 		Connections:      make(map[string]net.Conn),
 		prepareResponses: make(map[int]map[int]Message),
 		acceptResponses:  make(map[int]map[int]Message),
-		numAcceptors:     countAcceptors(hosts), // Initialize number of acceptors
+		numAcceptors:     countAcceptors(hosts, proposerNum),
 		PeerRoles:        hosts,
+		acceptSent:       make(map[int]bool),
 	}
 
 	// Set the proposed value if this peer is a proposer
@@ -83,12 +89,16 @@ func main() {
 	// Start server
 	go startServer(peer)
 
-	// Wait for other peers to start and establish connections
-	time.Sleep(1 * time.Second)
-	establishConnections(peer, hosts, hostname)
-
-	// If this is proposer1, start the Paxos protocol
+	// If this is proposer1, start immediately
 	if containsRole(peer.Roles, "proposer1") {
+		// peer.ProposedValue = "X" // Hardcode value X for proposer1
+		startPaxos(peer)
+	}
+
+	// If this is proposer2, wait and then start
+	if containsRole(peer.Roles, "proposer2") {
+		// peer.ProposedValue = "Y" // Hardcode value Y for proposer2
+		time.Sleep(time.Duration(*delay * 0))
 		startPaxos(peer)
 	}
 
@@ -165,35 +175,17 @@ func containsRole(roles []string, targetRole string) bool {
 func startServer(peer *Peer) {
 	listener, err := net.Listen("tcp", ":"+PORT)
 	if err != nil {
-		fmt.Printf("Error starting server: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 		os.Exit(1)
 	}
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Printf("Error accepting connection: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error accepting connection: %v\n", err)
 			continue
 		}
 		go handleConnection(peer, conn)
-	}
-}
-
-func establishConnections(peer *Peer, hosts map[string][]string, currentHostname string) {
-	for hostname := range hosts {
-		if hostname == currentHostname {
-			continue
-		}
-
-		conn, err := net.Dial("tcp", hostname+":"+PORT)
-		if err != nil {
-			fmt.Printf("Error connecting to %s: %v\n", hostname, err)
-			continue
-		}
-
-		peer.mutex.Lock()
-		peer.Connections[hostname] = conn
-		peer.mutex.Unlock()
 	}
 }
 
@@ -210,21 +202,24 @@ func handleConnection(peer *Peer, conn net.Conn) {
 }
 
 func broadcastToAcceptors(peer *Peer, msg Message) {
-	msgBytes, _ := json.Marshal(msg)
-
-	for hostname, conn := range peer.Connections {
-		// Skip if it's the current peer (comparing peer ID is more reliable than hostname)
+	for hostname, roles := range peer.PeerRoles {
+		// Skip if it's the current peer
 		if getPeerID(hostname, peer.PeerRoles) == peer.ID {
 			continue
 		}
-		// Only send to peers that are acceptors for this proposer
-		if isAcceptorFor(peer.PeerRoles[hostname], peer.ID) {
-			conn.Write(msgBytes)
+		// Use proposer number instead of peer ID
+		if isAcceptorFor(roles, peer.ProposerNum) {
+			sendMessage(peer, hostname, msg)
 		}
 	}
 }
 
-func sendMessage(conn net.Conn, msg Message) error {
+func sendMessage(peer *Peer, hostname string, msg Message) error {
+	conn, err := establishConnection(peer, hostname)
+	if err != nil {
+		return err
+	}
+
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -236,12 +231,11 @@ func sendMessage(conn net.Conn, msg Message) error {
 
 func logMessage(msg Message) {
 	jsonMsg, _ := json.Marshal(msg)
-	fmt.Println(string(jsonMsg))
+	fmt.Fprintln(os.Stderr, string(jsonMsg))
 }
 
 func startPaxos(peer *Peer) {
-	// Start with proposal number = peerID to ensure uniqueness
-	proposalNum := peer.ID
+	proposalNum := peer.ProposerNum
 
 	// Cleanup old responses before starting new round
 	cleanupResponses(peer, proposalNum)
@@ -289,28 +283,34 @@ func handleMessage(peer *Peer, msg Message) {
 }
 
 func handlePrepare(peer *Peer, msg Message) {
-	// Only handle if we're an acceptor for this proposer
 	if !isAcceptorFor(peer.Roles, msg.PeerID) {
 		return
 	}
 
+	// Always respond to prepare messages, but include our current accepted value
 	if msg.ProposalNum > peer.MinProposal {
 		peer.MinProposal = msg.ProposalNum
+
+		responseNum := msg.ProposalNum
+		if peer.AcceptedValue != "" {
+			responseNum = peer.AcceptedNum
+		}
 
 		response := Message{
 			PeerID:       peer.ID,
 			Action:       "sent",
 			MessageType:  "prepare_ack",
-			MessageValue: peer.AcceptedValue,
-			ProposalNum:  msg.ProposalNum,
+			MessageValue: peer.AcceptedValue, // Include any previously accepted value
+			ProposalNum:  responseNum,        // Include the proposal number of accepted value
 		}
 
 		logMessage(response)
-		// Send response back to proposer
-		for hostname, conn := range peer.Connections {
-			// Only send to the original proposer
-			if containsRole(peer.PeerRoles[hostname], fmt.Sprintf("proposer%d", msg.PeerID)) {
-				sendMessage(conn, response)
+
+		// Find proposer's hostname and send message
+		for hostname, roles := range peer.PeerRoles {
+			if containsRole(roles, fmt.Sprintf("proposer%d", msg.PeerID)) {
+				sendMessage(peer, hostname, response)
+				break
 			}
 		}
 	}
@@ -318,6 +318,11 @@ func handlePrepare(peer *Peer, msg Message) {
 
 func handlePrepareAck(peer *Peer, msg Message) {
 	if !isProposer(peer.Roles) {
+		return
+	}
+
+	// Skip if we've already sent accept for this proposal
+	if peer.acceptSent[msg.ProposalNum] {
 		return
 	}
 
@@ -332,6 +337,8 @@ func handlePrepareAck(peer *Peer, msg Message) {
 		highestAcceptedNum := 0
 		var valueToPropose string = peer.ProposedValue
 
+		// If any acceptor has already accepted a value, use the value
+		// with the highest proposal number
 		for _, response := range peer.prepareResponses[msg.ProposalNum] {
 			if response.ProposalNum > highestAcceptedNum && response.MessageValue != "" {
 				highestAcceptedNum = response.ProposalNum
@@ -339,7 +346,11 @@ func handlePrepareAck(peer *Peer, msg Message) {
 			}
 		}
 
-		// Send accept message
+		// Mark that we've sent accept for this proposal
+		peer.acceptSent[msg.ProposalNum] = true
+
+		// Send accept message with either the highest accepted value
+		// or our proposed value if no value was previously accepted
 		acceptMsg := Message{
 			PeerID:       peer.ID,
 			Action:       "sent",
@@ -374,9 +385,9 @@ func handleAccept(peer *Peer, msg Message) {
 
 		logMessage(response)
 		// Send response only to the proposer
-		for hostname, conn := range peer.Connections {
+		for hostname := range peer.Connections {
 			if containsRole(peer.PeerRoles[hostname], fmt.Sprintf("proposer%d", msg.PeerID)) {
-				sendMessage(conn, response)
+				sendMessage(peer, hostname, response)
 				break // Only need to send to one proposer
 			}
 		}
@@ -419,13 +430,16 @@ func handleAcceptAck(peer *Peer, msg Message) {
 		}
 
 		// No rejections and we have majority - value is chosen
-		logMessage(Message{
-			PeerID:       peer.ID,
-			Action:       "chose",
-			MessageType:  "chose",
-			MessageValue: msg.MessageValue,
-			ProposalNum:  msg.ProposalNum,
-		})
+		if !peer.hasChosen {
+			logMessage(Message{
+				PeerID:       peer.ID,
+				Action:       "chose",
+				MessageType:  "chose",
+				MessageValue: msg.MessageValue,
+				ProposalNum:  msg.ProposalNum,
+			})
+			peer.hasChosen = true
+		}
 
 		// Cleanup after successful consensus
 		cleanupResponses(peer, msg.ProposalNum)
@@ -433,24 +447,21 @@ func handleAcceptAck(peer *Peer, msg Message) {
 }
 
 // Add this new helper function to count acceptors
-func countAcceptors(hosts map[string][]string) int {
+func countAcceptors(hosts map[string][]string, proposerID int) int {
 	count := 0
+	acceptorRole := fmt.Sprintf("acceptor%d", proposerID)
+
 	for _, roles := range hosts {
-		for _, role := range roles {
-			if role == "acceptor1" { // Only count acceptors for proposer1 in this case
-				count++
-				break
-			}
+		if containsRole(roles, acceptorRole) {
+			count++
 		}
 	}
+
 	return count
 }
 
 // Add cleanup function for response maps
 func cleanupResponses(peer *Peer, proposalNum int) {
-	// peer.mutex.Lock()
-	// defer peer.mutex.Unlock()
-
 	// Clean up old prepare responses
 	for pn := range peer.prepareResponses {
 		if pn < proposalNum {
@@ -464,8 +475,45 @@ func cleanupResponses(peer *Peer, proposalNum int) {
 			delete(peer.acceptResponses, pn)
 		}
 	}
+
+	// Clean up old acceptSent flags
+	for pn := range peer.acceptSent {
+		if pn < proposalNum {
+			delete(peer.acceptSent, pn)
+		}
+	}
 }
 
 func isAcceptorFor(roles []string, proposerID int) bool {
 	return containsRole(roles, fmt.Sprintf("acceptor%d", proposerID))
+}
+
+// Add this helper function to establish a single connection
+func establishConnection(peer *Peer, hostname string) (net.Conn, error) {
+
+	// Check if connection already exists
+	if conn, exists := peer.Connections[hostname]; exists {
+		return conn, nil
+	}
+
+	// Try to establish new connection
+	conn, err := net.Dial("tcp", hostname+":"+PORT)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to %s: %v", hostname, err)
+	}
+
+	// Store the new connection
+	peer.Connections[hostname] = conn
+	return conn, nil
+}
+
+// Add helper function to get proposer number
+func getProposerNumber(roles []string) int {
+	for _, role := range roles {
+		if strings.HasPrefix(role, "proposer") {
+			num, _ := strconv.Atoi(strings.TrimPrefix(role, "proposer"))
+			return num
+		}
+	}
+	return -1
 }

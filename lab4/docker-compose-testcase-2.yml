@@ -37,7 +37,7 @@ services:
       - mynetwork
     hostname: "peer5"
     container_name: "peer5"
-    command: -h hostsfile-testcase2.txt -v Y -t 10
+    command: -h hostsfile-testcase2.txt -v Y -t 1
 
 networks:
   # The presence of these objects is sufficient to define them
