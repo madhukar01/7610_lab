@@ -26,6 +26,7 @@ type Message struct {
 type Peer struct {
 	ID               int
 	ProposerNum      int
+	CurrentProposal  int
 	Roles            []string
 	MinProposal      int
 	AcceptedValue    string
@@ -67,12 +68,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize peer with proposer number instead of peer ID for proposals
+	// Initialize peer
 	proposerNum := getProposerNumber(hosts[hostname])
 	peer := &Peer{
 		ID:               getPeerID(hostname, hosts),
-		Roles:            hosts[hostname],
 		ProposerNum:      proposerNum,
+		CurrentProposal:  proposerNum - 1,
+		Roles:            hosts[hostname],
 		Connections:      make(map[string]net.Conn),
 		prepareResponses: make(map[int]map[int]Message),
 		acceptResponses:  make(map[int]map[int]Message),
@@ -81,24 +83,20 @@ func main() {
 		acceptSent:       make(map[int]bool),
 	}
 
-	// Set the proposed value if this peer is a proposer
-	if isProposer(peer.Roles) && *value != "" {
-		peer.ProposedValue = *value
-	}
-
-	// Start server
+	// Start server - listen for incoming messages
 	go startServer(peer)
 
-	// If this is proposer1, start immediately
-	if containsRole(peer.Roles, "proposer1") {
-		// peer.ProposedValue = "X" // Hardcode value X for proposer1
-		startPaxos(peer)
-	}
+	// If this peer is a proposer - start Paxos
+	if isProposer(peer.Roles) {
+		// If value flag is provided, set it as the proposed value
+		if *value != "" {
+			peer.ProposedValue = *value
+		}
 
-	// If this is proposer2, wait and then start
-	if containsRole(peer.Roles, "proposer2") {
-		// peer.ProposedValue = "Y" // Hardcode value Y for proposer2
-		time.Sleep(time.Duration(*delay * 0))
+		// Apply delay if specified
+		if *delay > 0 {
+			time.Sleep(time.Duration(*delay * float64(time.Second)))
+		}
 		startPaxos(peer)
 	}
 
@@ -106,6 +104,7 @@ func main() {
 	select {}
 }
 
+// Check if this peer is a proposer
 func isProposer(roles []string) bool {
 	for _, role := range roles {
 		if strings.HasPrefix(role, "proposer") {
@@ -115,6 +114,7 @@ func isProposer(roles []string) bool {
 	return false
 }
 
+// Parse the hosts file
 func parseHostsFile(filepath string) (map[string][]string, error) {
 	content, err := os.ReadFile(filepath)
 	if err != nil {
@@ -235,7 +235,12 @@ func logMessage(msg Message) {
 }
 
 func startPaxos(peer *Peer) {
-	proposalNum := peer.ProposerNum
+	// Increment proposal number for new round
+	peer.mutex.Lock()
+	peer.CurrentProposal++
+	proposalNum := peer.CurrentProposal
+	peer.hasChosen = false // Reset hasChosen to allow new 'chose' message for this round
+	peer.mutex.Unlock()
 
 	// Cleanup old responses before starting new round
 	cleanupResponses(peer, proposalNum)
@@ -263,7 +268,7 @@ func handleMessage(peer *Peer, msg Message) {
 	defer peer.mutex.Unlock()
 
 	logMessage(Message{
-		PeerID:       peer.ID,
+		PeerID:       msg.PeerID,
 		Action:       "received",
 		MessageType:  msg.MessageType,
 		MessageValue: msg.MessageValue,
@@ -283,19 +288,33 @@ func handleMessage(peer *Peer, msg Message) {
 }
 
 func handlePrepare(peer *Peer, msg Message) {
-	if !isAcceptorFor(peer.Roles, msg.PeerID) {
+	// Find the proposer number from the sender's roles
+	// This is needed because acceptors are named acceptor1/acceptor2, not by peer ID
+	var proposerNum int
+	for hostname, roles := range peer.PeerRoles {
+		if getPeerID(hostname, peer.PeerRoles) == msg.PeerID {
+			proposerNum = getProposerNumber(roles)
+			break
+		}
+	}
+
+	// Check if we're an acceptor for this proposer number
+	if !isAcceptorFor(peer.Roles, proposerNum) {
 		return
 	}
 
-	// Always respond to prepare messages, but include our current accepted value
+	// If this is a higher proposal number, we must accept it
 	if msg.ProposalNum > peer.MinProposal {
 		peer.MinProposal = msg.ProposalNum
+		peer.hasChosen = false // Reset hasChosen to allow new 'chose' message for higher proposal
 
+		// If we have previously accepted a value, include it in response
 		responseNum := msg.ProposalNum
 		if peer.AcceptedValue != "" {
 			responseNum = peer.AcceptedNum
 		}
 
+		// Prepare response with any previously accepted value
 		response := Message{
 			PeerID:       peer.ID,
 			Action:       "sent",
@@ -306,9 +325,9 @@ func handlePrepare(peer *Peer, msg Message) {
 
 		logMessage(response)
 
-		// Find proposer's hostname and send message
+		// Find and send response to the original proposer
 		for hostname, roles := range peer.PeerRoles {
-			if containsRole(roles, fmt.Sprintf("proposer%d", msg.PeerID)) {
+			if containsRole(roles, fmt.Sprintf("proposer%d", proposerNum)) {
 				sendMessage(peer, hostname, response)
 				break
 			}
@@ -326,19 +345,20 @@ func handlePrepareAck(peer *Peer, msg Message) {
 		return
 	}
 
+	// Store the prepare_ack response
 	if _, exists := peer.prepareResponses[msg.ProposalNum]; !exists {
 		peer.prepareResponses[msg.ProposalNum] = make(map[int]Message)
 	}
 	peer.prepareResponses[msg.ProposalNum][msg.PeerID] = msg
 
-	// Check if we have majority
+	// Check if we have majority of responses
 	if len(peer.prepareResponses[msg.ProposalNum]) > peer.numAcceptors/2 {
 		// Find highest accepted proposal among responses
 		highestAcceptedNum := 0
 		var valueToPropose string = peer.ProposedValue
 
 		// If any acceptor has already accepted a value, use the value
-		// with the highest proposal number
+		// with the highest proposal number (Paxos requirement)
 		for _, response := range peer.prepareResponses[msg.ProposalNum] {
 			if response.ProposalNum > highestAcceptedNum && response.MessageValue != "" {
 				highestAcceptedNum = response.ProposalNum
@@ -346,7 +366,7 @@ func handlePrepareAck(peer *Peer, msg Message) {
 			}
 		}
 
-		// Mark that we've sent accept for this proposal
+		// Mark that we've sent accept for this proposal to avoid duplicates
 		peer.acceptSent[msg.ProposalNum] = true
 
 		// Send accept message with either the highest accepted value
@@ -356,7 +376,7 @@ func handlePrepareAck(peer *Peer, msg Message) {
 			Action:       "sent",
 			MessageType:  "accept",
 			MessageValue: valueToPropose,
-			ProposalNum:  msg.ProposalNum,
+			ProposalNum:  peer.CurrentProposal,
 		}
 
 		logMessage(acceptMsg)
@@ -365,8 +385,17 @@ func handlePrepareAck(peer *Peer, msg Message) {
 }
 
 func handleAccept(peer *Peer, msg Message) {
-	// Only handle if we're an acceptor for this proposer
-	if !isAcceptorFor(peer.Roles, msg.PeerID) {
+	// Find the proposer number from the sender's roles
+	var proposerNum int
+	for hostname, roles := range peer.PeerRoles {
+		if getPeerID(hostname, peer.PeerRoles) == msg.PeerID {
+			proposerNum = getProposerNumber(roles)
+			break
+		}
+	}
+
+	// Check if we're an acceptor for this proposer number
+	if !isAcceptorFor(peer.Roles, proposerNum) {
 		return
 	}
 
@@ -386,7 +415,7 @@ func handleAccept(peer *Peer, msg Message) {
 		logMessage(response)
 		// Send response only to the proposer
 		for hostname := range peer.Connections {
-			if containsRole(peer.PeerRoles[hostname], fmt.Sprintf("proposer%d", msg.PeerID)) {
+			if containsRole(peer.PeerRoles[hostname], fmt.Sprintf("proposer%d", proposerNum)) {
 				sendMessage(peer, hostname, response)
 				break // Only need to send to one proposer
 			}
@@ -423,8 +452,8 @@ func handleAcceptAck(peer *Peer, msg Message) {
 			if response.ProposalNum > msg.ProposalNum {
 				// Got a rejection, need to start over with higher number
 				cleanupResponses(peer, msg.ProposalNum) // Cleanup before retry
-				startPaxos(peer)
 				peer.mutex.Unlock()
+				startPaxos(peer)
 				return
 			}
 		}

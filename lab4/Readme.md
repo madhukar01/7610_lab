@@ -7,7 +7,8 @@
 lab2/
 ├── src/
 │   ├── main.go
-│   ├── hostsfile.txt
+│   ├── hostsfile-testcase1.txt
+│   ├── hostsfile-testcase2.txt
 │   ├── go.mod
 ├── Dockerfile
 ├── Readme.md
@@ -18,7 +19,8 @@ lab2/
 ```
 - `src/` contains the source code.
     - `src/main.go` contains the main function with membership protocol.
-    - `src/hostsfile.txt` is the hosts file.
+    - `src/hostsfile-testcase1.txt` is the hosts file for testcase 1.
+    - `src/hostsfile-testcase2.txt` is the hosts file for testcase 2.
 - `docker-compose-testcase-*.yml` docker compose file for running the containers for the testcases.
 - `Dockerfile` is the Dockerfile to build the docker image.
 
