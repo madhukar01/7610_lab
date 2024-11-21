@@ -1,0 +1,89 @@
+\documentclass[12pt]{article}
+\usepackage[a4paper, margin=1in]{geometry}
+\usepackage{caption}
+
+
+\title{Building an Oracle Network for Ethereum to Leverage Large Language Models}
+\author{Madhukara S. Holla}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{1. Context}
+Blockchain applications increasingly require off-chain data for smart contracts, but existing oracle solutions are limited to deterministic data sources. With the rise of generative AI models like Large Language Models (LLMs), smart contracts could access nuanced, context-aware insights. However, challenges such as non-determinism in LLM responses, security, and verifiability hinder their direct integration. A decentralized oracle capable of interfacing with LLMs while ensuring consensus and tamper-proof operation can address these gaps.
+
+\section*{2. Problem}
+Smart contracts cannot directly access external systems like LLMs. Existing oracles lack mechanisms to handle the non-deterministic outputs of LLMs or to ensure consensus on such outputs. Moreover, logging operations in a verifiable and immutable way is critical for auditing but often underexplored. The problem becomes more complex with the need for privacy-preserving LLM interactions.
+
+\section*{3. Proposed Work}
+We will implement a novel decentralized oracle system with the following components:
+
+\textbf{Core Architecture:}
+\begin{itemize}
+    \item Ethereum-compatible oracle network using PBFT consensus
+    \item Smart contract interface for query submission and response retrieval
+    \item Log storage on IPFS with on-chain hash references
+    \item Response validation and semantic similarity scoring
+\end{itemize}
+
+\textbf{Implementation Scope:}
+\begin{itemize}
+    \item Development of oracle node network in Python
+        \begin{itemize}
+            \item Integration with LangChain/OpenAI for robust LLM handling
+            \item Response normalization using NLP libraries
+            \item Semantic similarity scoring for consensus
+        \end{itemize}
+    \item Smart contract system in Solidity for request handling and hash storage
+    \item PBFT consensus implementation with semantic response clustering
+    \item IPFS integration for response log storage
+\end{itemize}
+
+\section*{4. Risks}
+\begin{itemize}
+    \item \textbf{Consensus Convergence}
+        \begin{itemize}
+            \item Risk: Non-deterministic LLM outputs may prevent consensus
+            \item Contingency: Implement deterministic sampling with fixed parameters and semantic clustering
+        \end{itemize}
+    \item \textbf{Cost Efficiency}
+        \begin{itemize}
+            \item Risk: High gas costs for on-chain operations
+            \item Contingency: Use IPFS for storage with minimal on-chain footprint
+        \end{itemize}
+    \item \textbf{Network Reliability}
+        \begin{itemize}
+            \item Risk: Node failures or network partitions
+            \item Contingency: Implement robust node selection and fallback mechanisms
+        \end{itemize}
+\end{itemize}
+
+\section*{5. Success}
+Project success will be measured by:
+\begin{itemize}
+    \item Successful consensus achievement with $f=\lfloor(n-1)/3\rfloor$ Byzantine nodes
+    \item Efficient storage and retrieval of LLM responses via IPFS
+    \item Verifiable response tracking through on-chain hash references
+    \item Sub-30 second response time for LLM queries
+    \item Successful handling of concurrent requests
+\end{itemize}
+
+\section*{6. Path to Research Paper}
+To evolve this project into a research paper:
+
+\textbf{Additional Work Required:}
+\begin{itemize}
+    \item Comprehensive performance analysis across multiple chains
+    \item Development of novel consensus mechanisms for non-deterministic data
+    \item Formal security proofs for the oracle network
+    \item Comparative analysis with existing oracle solutions
+\end{itemize}
+
+\textbf{Research Contributions:}
+\begin{itemize}
+    \item New consensus protocols for AI-oracle systems
+    \item Security framework for decentralized AI integration
+    \item Performance optimization techniques for cross-chain oracle operations
+\end{itemize}
+\end{document}
