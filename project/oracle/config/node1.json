@@ -1,0 +1,9 @@
+{
+    "node_id": "node1",
+    "listen_address": ":8000",
+    "peers": ["node2", "node3", "node4"],
+    "consensus_timeout": 5000,
+    "view_change_timeout": 10000,
+    "max_message_size": 1048576,
+    "connection_timeout": 5000
+}
