@@ -16,10 +16,20 @@ type ConsensusMessage struct {
 	Data     []byte
 }
 
+// Update the PBFTState definition
+type PBFTState string
+
 const (
 	// PBFT States
-	Normal PBFTState = iota
-	ViewChangeState
+	StateNone       PBFTState = "NONE"
+	StatePrePrepare PBFTState = "PRE-PREPARE"
+	StatePrepare    PBFTState = "PREPARE"
+	StateCommit     PBFTState = "COMMIT"
+	StateFinalized  PBFTState = "FINALIZED"
+
+	// Additional states for view changes
+	StateViewChange PBFTState = "VIEW-CHANGE"
+	StateNormal     PBFTState = "NORMAL"
 )
 
 const (
@@ -32,7 +42,6 @@ const (
 )
 
 type MessageType int
-type PBFTState int
 
 type ViewChangeData struct {
 	NewView    uint64

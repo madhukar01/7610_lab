@@ -20,23 +20,25 @@ var (
 
 // NewPBFT creates a new PBFT consensus engine
 func NewPBFT(nodeID string, nodes []string, timeout time.Duration) *PBFT {
-	f := (len(nodes) - 1) / 3
 	pbft := &PBFT{
-		nodeID:            nodeID,
-		nodes:             nodes,
-		f:                 f,
-		timeout:           timeout,
-		prepareMessages:   make(map[uint64]map[string]*ConsensusMessage),
-		commitMessages:    make(map[uint64]map[string]*ConsensusMessage),
-		msgChan:           make(chan *ConsensusMessage, 1000),
-		doneChan:          make(chan struct{}),
-		viewChangeTimeout: timeout * 2, // View change timeout is typically longer than normal timeout
-		viewChangeMsgs:    make(map[uint64]map[string]*ConsensusMessage),
-		state:             Normal,
-		checkpoints:       make(map[uint64][]byte),
-		networkManager:    nil,
+		nodeID:          nodeID,
+		nodes:           nodes,
+		timeout:         timeout,
+		view:            0,
+		sequence:        0,
+		state:           StateNormal,
+		prepareMessages: make(map[uint64]map[string]*ConsensusMessage),
+		commitMessages:  make(map[uint64]map[string]*ConsensusMessage),
+		viewChangeMsgs:  make(map[uint64]map[string]*ConsensusMessage),
+		msgChan:         make(chan *ConsensusMessage, 1000),
+		doneChan:        make(chan struct{}),
+		f:               (len(nodes) - 1) / 3,
+		checkpoints:     make(map[uint64][]byte),
 	}
-	pbft.resetViewTimer()
+
+	// Set initial leader (node0)
+	pbft.isLeader = nodeID == nodes[0]
+
 	return pbft
 }
 
@@ -101,7 +103,7 @@ func (p *PBFT) handleMessage(msg *ConsensusMessage) {
 		p.handleViewChange(msg)
 	case NewView:
 		// Handle new view message
-		if p.state == ViewChangeState {
+		if p.state == StateViewChange {
 			p.processNewView(p.view)
 		}
 	}
@@ -258,7 +260,7 @@ func (p *PBFT) startViewChange(newView uint64) {
 		return
 	}
 
-	p.state = ViewChangeState
+	p.state = StateViewChange
 
 	// Create view change message
 	viewChangeData := &ViewChangeData{
@@ -331,7 +333,7 @@ func (p *PBFT) processNewView(newView uint64) {
 
 	// Update view number
 	p.view = newView
-	p.state = Normal
+	p.state = StateNormal
 
 	// Reset view change messages
 	p.viewChangeMsgs = make(map[uint64]map[string]*ConsensusMessage)
@@ -399,4 +401,46 @@ func (p *PBFT) RegisterResultCallback(callback func(ConsensusResult)) {
 
 func (p *PBFT) SetNetworkManager(nm *NetworkManager) {
 	p.networkManager = nm
+}
+
+// IsLeader returns whether this node is the current leader
+func (p *PBFT) IsLeader() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.isLeader
+}
+
+// Keep the getter methods
+func (p *PBFT) GetSequence() uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.sequence
+}
+
+func (p *PBFT) GetView() uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.view
+}
+
+func (p *PBFT) GetLeader() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.nodeID
+}
+
+func (p *PBFT) GetState() PBFTState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.state
+}
+
+func (p *PBFT) RestoreState(sequence uint64, view uint64, state PBFTState) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.sequence = sequence
+	p.view = view
+	p.state = state
+	return nil
 }

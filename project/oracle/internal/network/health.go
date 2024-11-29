@@ -79,33 +79,38 @@ func (hm *HealthManager) checkPeer(peerID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
 	defer cancel()
 
-	startTime := time.Now()
+	select {
+	case <-ctx.Done():
+		return
+	default:
+		startTime := time.Now()
 
-	healthCheck := &HealthCheck{
-		Type:   "ping",
-		Time:   time.Now().UnixNano(),
-		NodeID: hm.transport.nodeID,
-	}
+		healthCheck := &HealthCheck{
+			Type:   "ping",
+			Time:   time.Now().UnixNano(),
+			NodeID: hm.transport.nodeID,
+		}
 
-	data, _ := json.Marshal(healthCheck)
-	err := hm.transport.Send(peerID, data)
+		data, _ := json.Marshal(healthCheck)
+		err := hm.transport.Send(peerID, data)
 
-	hm.mu.Lock()
-	defer hm.mu.Unlock()
+		hm.mu.Lock()
+		defer hm.mu.Unlock()
 
-	health, exists := hm.peerHealth[peerID]
-	if !exists {
-		health = &PeerHealth{}
-		hm.peerHealth[peerID] = health
-	}
+		health, exists := hm.peerHealth[peerID]
+		if !exists {
+			health = &PeerHealth{}
+			hm.peerHealth[peerID] = health
+		}
 
-	if err != nil {
-		health.Failures++
-		health.IsHealthy = false
-	} else {
-		health.Latency = time.Since(startTime)
-		health.LastSeen = time.Now()
-		health.Failures = 0
-		health.IsHealthy = true
+		if err != nil {
+			health.Failures++
+			health.IsHealthy = false
+		} else {
+			health.Latency = time.Since(startTime)
+			health.LastSeen = time.Now()
+			health.Failures = 0
+			health.IsHealthy = true
+		}
 	}
 }

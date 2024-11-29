@@ -8,6 +8,9 @@ import (
 	"io"
 )
 
+// MessageHandler is a function type that handles incoming messages
+type MessageHandler func(*Message) error
+
 // MaxMessageSize is the maximum size of a message in bytes
 const MaxMessageSize = 10 * 1024 * 1024 // 10MB
 

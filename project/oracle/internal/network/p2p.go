@@ -2,11 +2,13 @@ package network
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,11 +28,17 @@ type P2PTransport struct {
 	healthManager *HealthManager
 	discovery     *PeerDiscovery
 	version       string
+	msgHandler    MessageHandler
 }
 
 // NewP2PTransport creates a new P2P transport
-func NewP2PTransport(nodeID, address, version string) *P2PTransport {
-	t := &P2PTransport{
+func NewP2PTransport(nodeID, address string, opts ...string) *P2PTransport {
+	version := "1.0.0" // default version
+	if len(opts) > 0 {
+		version = opts[0]
+	}
+
+	return &P2PTransport{
 		nodeID:       nodeID,
 		address:      address,
 		peers:        make(map[string]string),
@@ -41,55 +49,114 @@ func NewP2PTransport(nodeID, address, version string) *P2PTransport {
 		reconnecting: make(map[string]bool),
 		version:      version,
 	}
-
-	t.healthManager = NewHealthManager(t)
-	t.discovery = NewPeerDiscovery(t, version)
-	return t
 }
 
 func (t *P2PTransport) Start(ctx context.Context) error {
-	if err := t.startListener(); err != nil {
-		return err
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Create listener
+	listener, err := net.Listen("tcp", t.address)
+	if err != nil {
+		return fmt.Errorf("failed to create listener: %w", err)
 	}
+	t.listener = listener
 
-	t.healthManager.Start()
-	t.discovery.Start()
+	// Start accept loop
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.doneChan:
+				return
+			default:
+				conn, err := listener.Accept()
+				if err != nil {
+					if !strings.Contains(err.Error(), "use of closed") {
+						log.Printf("Accept error: %v", err)
+					}
+					return
+				}
+				go t.handleConnection(conn)
+			}
+		}
+	}()
 
-	go t.acceptConnections(ctx)
 	return nil
 }
 
 func (t *P2PTransport) Stop() error {
-	t.healthManager.Stop()
-	t.discovery.Stop()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Signal shutdown
 	close(t.doneChan)
-	return t.listener.Close()
+
+	// Close listener
+	if t.listener != nil {
+		t.listener.Close()
+	}
+
+	// Close all connections
+	for _, conn := range t.connections {
+		conn.Close()
+	}
+
+	// Clear connections map
+	t.connections = make(map[string]net.Conn)
+
+	return nil
 }
 
-func (t *P2PTransport) Send(to string, payload []byte) error {
+func (t *P2PTransport) Send(peerID string, payload []byte) error {
+	// Try to get existing connection first
 	t.mu.RLock()
-	conn, exists := t.connections[to]
+	conn, exists := t.connections[peerID]
 	t.mu.RUnlock()
 
 	if !exists {
-		if err := t.connectWithRetry(to); err != nil {
+		if err := t.connectWithRetry(peerID); err != nil {
 			return fmt.Errorf("failed to establish connection: %w", err)
 		}
 		t.mu.RLock()
-		conn = t.connections[to]
+		conn = t.connections[peerID]
 		t.mu.RUnlock()
 	}
 
+	// Send the message
 	msg := &Message{
 		From:    t.nodeID,
-		To:      to,
+		To:      peerID,
 		Payload: payload,
 	}
 
-	if err := t.sendMessage(conn, msg); err != nil {
-		t.closeConnection(to)
-		t.handleConnectionFailure(to)
-		return fmt.Errorf("failed to send message: %w", err)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	// Write with deadline
+	deadline := time.Now().Add(500 * time.Millisecond)
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("failed to set write deadline: %w", err)
+	}
+
+	// Write message length
+	length := uint32(len(data))
+	if err := binary.Write(conn, binary.BigEndian, length); err != nil {
+		t.mu.Lock()
+		delete(t.connections, peerID)
+		t.mu.Unlock()
+		return fmt.Errorf("failed to write message length: %w", err)
+	}
+
+	// Write message data
+	if _, err := conn.Write(data); err != nil {
+		t.mu.Lock()
+		delete(t.connections, peerID)
+		t.mu.Unlock()
+		return fmt.Errorf("failed to write message data: %w", err)
 	}
 
 	return nil
@@ -122,24 +189,6 @@ func (t *P2PTransport) RegisterPeer(id string, address string) error {
 
 	t.peers[id] = address
 	return nil
-}
-
-func (t *P2PTransport) acceptConnections(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.doneChan:
-			return
-		default:
-			conn, err := t.listener.Accept()
-			if err != nil {
-				log.Printf("Failed to accept connection: %v", err)
-				continue
-			}
-			go t.handleConnection(conn)
-		}
-	}
 }
 
 func (t *P2PTransport) handleConnection(conn net.Conn) {
@@ -184,36 +233,34 @@ func (t *P2PTransport) handleConnection(conn net.Conn) {
 }
 
 func (t *P2PTransport) connectWithRetry(peerID string) error {
-	t.mu.Lock()
-	if t.reconnecting[peerID] {
-		t.mu.Unlock()
-		return fmt.Errorf("already attempting to reconnect to peer %s", peerID)
+	t.mu.RLock()
+	peerAddr, exists := t.peers[peerID]
+	t.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("unknown peer: %s", peerID)
 	}
-	t.reconnecting[peerID] = true
-	t.mu.Unlock()
 
-	defer func() {
-		t.mu.Lock()
-		delete(t.reconnecting, peerID)
-		t.mu.Unlock()
-	}()
-
-	var lastErr error
-	for attempt := 0; attempt < t.retryConfig.MaxAttempts; attempt++ {
-		if err := t.connect(peerID); err != nil {
-			lastErr = err
-			delay := t.retryConfig.calculateDelay(attempt)
-
-			select {
-			case <-t.doneChan:
-				return fmt.Errorf("transport shutting down")
-			case <-time.After(delay):
-				continue
-			}
-		}
+	// Check if already connected
+	t.mu.RLock()
+	_, connected := t.connections[peerID]
+	t.mu.RUnlock()
+	if connected {
 		return nil
 	}
-	return fmt.Errorf("failed to connect after %d attempts: %v", t.retryConfig.MaxAttempts, lastErr)
+
+	// Single connection attempt with short timeout
+	conn, err := net.DialTimeout("tcp", peerAddr, 500*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("connection failed: %w", err)
+	}
+
+	t.mu.Lock()
+	t.connections[peerID] = conn
+	t.mu.Unlock()
+
+	go t.handleConnection(conn)
+	return nil
 }
 
 func (t *P2PTransport) handleConnectionFailure(peerID string) {
@@ -294,4 +341,15 @@ func (t *P2PTransport) handleMessage(msg *Message) error {
 	}
 
 	return nil
+}
+
+func (t *P2PTransport) SetMessageHandler(handler MessageHandler) {
+	t.msgHandler = handler
+}
+
+// Add this method to get the node ID
+func (t *P2PTransport) NodeID() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.nodeID
 }
