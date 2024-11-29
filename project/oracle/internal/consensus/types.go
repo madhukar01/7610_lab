@@ -95,4 +95,5 @@ type PBFT struct {
 	lastCheckpointSeq  uint64
 	checkpoints        map[uint64][]byte
 	resultCallback     func(ConsensusResult)
+	networkManager     *NetworkManager
 }

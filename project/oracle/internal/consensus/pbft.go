@@ -34,6 +34,7 @@ func NewPBFT(nodeID string, nodes []string, timeout time.Duration) *PBFT {
 		viewChangeMsgs:    make(map[uint64]map[string]*ConsensusMessage),
 		state:             Normal,
 		checkpoints:       make(map[uint64][]byte),
+		networkManager:    nil,
 	}
 	pbft.resetViewTimer()
 	return pbft
@@ -189,8 +190,11 @@ func (p *PBFT) executeConsensus(sequence uint64, data []byte) {
 }
 
 func (p *PBFT) broadcast(msg *ConsensusMessage) {
-	// TODO: Implement actual network broadcast
-	// This will be connected to the network layer
+	if p.networkManager != nil {
+		if err := p.networkManager.Broadcast(msg); err != nil {
+			log.Printf("Failed to broadcast message: %v", err)
+		}
+	}
 }
 
 func (p *PBFT) validateMessage(msg *ConsensusMessage) error {
@@ -391,4 +395,8 @@ func (p *PBFT) cleanup(sequence uint64) {
 
 func (p *PBFT) RegisterResultCallback(callback func(ConsensusResult)) {
 	p.resultCallback = callback
+}
+
+func (p *PBFT) SetNetworkManager(nm *NetworkManager) {
+	p.networkManager = nm
 }
