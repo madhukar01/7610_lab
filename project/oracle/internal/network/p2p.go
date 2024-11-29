@@ -7,29 +7,34 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 )
 
 // P2PTransport implements the Transport interface
 type P2PTransport struct {
-	mu          sync.RWMutex
-	nodeID      string
-	address     string
-	peers       map[string]string // nodeID -> address
-	listener    net.Listener
-	connections map[string]net.Conn
-	msgChan     chan *Message
-	doneChan    chan struct{}
+	mu           sync.RWMutex
+	nodeID       string
+	address      string
+	peers        map[string]string // nodeID -> address
+	listener     net.Listener
+	connections  map[string]net.Conn
+	msgChan      chan *Message
+	doneChan     chan struct{}
+	retryConfig  *RetryConfig
+	reconnecting map[string]bool
 }
 
 // NewP2PTransport creates a new P2P transport
 func NewP2PTransport(nodeID, address string) *P2PTransport {
 	return &P2PTransport{
-		nodeID:      nodeID,
-		address:     address,
-		peers:       make(map[string]string),
-		connections: make(map[string]net.Conn),
-		msgChan:     make(chan *Message, 1000),
-		doneChan:    make(chan struct{}),
+		nodeID:       nodeID,
+		address:      address,
+		peers:        make(map[string]string),
+		connections:  make(map[string]net.Conn),
+		msgChan:      make(chan *Message, 1000),
+		doneChan:     make(chan struct{}),
+		retryConfig:  DefaultRetryConfig(),
+		reconnecting: make(map[string]bool),
 	}
 }
 
@@ -58,11 +63,12 @@ func (t *P2PTransport) Send(to string, payload []byte) error {
 	t.mu.RUnlock()
 
 	if !exists {
-		// Try to establish connection
-		if err := t.connect(to); err != nil {
-			return fmt.Errorf("failed to connect to peer: %w", err)
+		if err := t.connectWithRetry(to); err != nil {
+			return fmt.Errorf("failed to establish connection: %w", err)
 		}
+		t.mu.RLock()
 		conn = t.connections[to]
+		t.mu.RUnlock()
 	}
 
 	msg := &Message{
@@ -71,8 +77,9 @@ func (t *P2PTransport) Send(to string, payload []byte) error {
 		Payload: payload,
 	}
 
-	// Send message
 	if err := t.sendMessage(conn, msg); err != nil {
+		t.closeConnection(to)
+		t.handleConnectionFailure(to)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
@@ -127,7 +134,23 @@ func (t *P2PTransport) acceptConnections(ctx context.Context) {
 }
 
 func (t *P2PTransport) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	var peerID string
+	t.mu.RLock()
+	for id, c := range t.connections {
+		if c == conn {
+			peerID = id
+			break
+		}
+	}
+	t.mu.RUnlock()
+
+	defer func() {
+		conn.Close()
+		if peerID != "" {
+			t.closeConnection(peerID)
+			t.handleConnectionFailure(peerID)
+		}
+	}()
 
 	for {
 		select {
@@ -142,7 +165,6 @@ func (t *P2PTransport) handleConnection(conn net.Conn) {
 				return
 			}
 
-			// Send message to channel
 			select {
 			case t.msgChan <- msg:
 			case <-t.doneChan:
@@ -150,6 +172,47 @@ func (t *P2PTransport) handleConnection(conn net.Conn) {
 			}
 		}
 	}
+}
+
+func (t *P2PTransport) connectWithRetry(peerID string) error {
+	t.mu.Lock()
+	if t.reconnecting[peerID] {
+		t.mu.Unlock()
+		return fmt.Errorf("already attempting to reconnect to peer %s", peerID)
+	}
+	t.reconnecting[peerID] = true
+	t.mu.Unlock()
+
+	defer func() {
+		t.mu.Lock()
+		delete(t.reconnecting, peerID)
+		t.mu.Unlock()
+	}()
+
+	var lastErr error
+	for attempt := 0; attempt < t.retryConfig.MaxAttempts; attempt++ {
+		if err := t.connect(peerID); err != nil {
+			lastErr = err
+			delay := t.retryConfig.calculateDelay(attempt)
+
+			select {
+			case <-t.doneChan:
+				return fmt.Errorf("transport shutting down")
+			case <-time.After(delay):
+				continue
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("failed to connect after %d attempts: %v", t.retryConfig.MaxAttempts, lastErr)
+}
+
+func (t *P2PTransport) handleConnectionFailure(peerID string) {
+	go func() {
+		if err := t.connectWithRetry(peerID); err != nil {
+			log.Printf("Failed to reconnect to peer %s: %v", peerID, err)
+		}
+	}()
 }
 
 func (t *P2PTransport) connect(peerID string) error {
