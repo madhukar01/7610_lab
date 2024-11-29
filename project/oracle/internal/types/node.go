@@ -1,4 +1,4 @@
-package types
+package node
 
 import (
 	"context"
@@ -14,6 +14,20 @@ const (
 	StateRunning
 	StateStopped
 )
+
+// OracleRequest represents a request to the oracle
+type OracleRequest struct {
+	RequestID string `json:"request_id"`
+	Query     string `json:"query"`
+	Callback  string `json:"callback"`
+}
+
+// OracleResponse represents a response from the oracle
+type OracleResponse struct {
+	RequestID string `json:"request_id"`
+	Response  []byte `json:"response"`
+	Error     error  `json:"error,omitempty"`
+}
 
 // Node represents an oracle node in the network
 type Node struct {

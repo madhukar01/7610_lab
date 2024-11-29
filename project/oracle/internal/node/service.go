@@ -3,18 +3,33 @@ package node
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"sync"
+	"time"
 
 	"oracle/internal/consensus"
+	"oracle/internal/logging"
 	"oracle/internal/network"
 )
+
+const defaultTimeout = 5 * time.Second
+
+// hash returns a simple hash of a string
+func hash(s string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return h.Sum32()
+}
 
 type OracleNode struct {
 	mu               sync.RWMutex
 	nodeID           string
+	address          string
+	logger           *logging.Logger
 	consensusEngine  *consensus.PBFT
 	networkTransport network.Transport
 	isRunning        bool
+	peers            map[string]string // peerID -> address
 
 	// Channels for request handling
 	requestChan  chan *OracleRequest
@@ -33,25 +48,60 @@ type OracleResponse struct {
 	Error     error
 }
 
-func NewOracleNode(nodeID string, peers []string) (*OracleNode, error) {
-	transport := network.NewP2PTransport(nodeID, fmt.Sprintf(":%d", 8000+hash(nodeID)%1000))
-	pbft := consensus.NewPBFT(nodeID, peers, defaultTimeout)
+func NewOracleNode(nodeID string, address string, logger *logging.Logger) (*OracleNode, error) {
+	transport := network.NewP2PTransport(nodeID, address)
 
 	node := &OracleNode{
 		nodeID:           nodeID,
-		consensusEngine:  pbft,
+		address:          address,
+		logger:           logger,
 		networkTransport: transport,
+		peers:            make(map[string]string),
 		requestChan:      make(chan *OracleRequest, 1000),
 		responseChan:     make(chan *OracleResponse, 1000),
 	}
 
-	// Set up network manager
-	networkManager := consensus.NewNetworkManager(transport, pbft)
-	pbft.SetNetworkManager(networkManager)
-
 	return node, nil
 }
 
+// InitConsensus initializes the consensus engine
+func (n *OracleNode) InitConsensus(nodes []string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.consensusEngine = consensus.NewPBFT(n.nodeID, nodes, defaultTimeout)
+
+	// Set up network manager
+	networkManager := consensus.NewNetworkManager(n.networkTransport, n.consensusEngine)
+	n.consensusEngine.SetNetworkManager(networkManager)
+}
+
+// GetConsensus returns the consensus engine
+func (n *OracleNode) GetConsensus() *consensus.PBFT {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.consensusEngine
+}
+
+// GetPeers returns a list of peer IDs
+func (n *OracleNode) GetPeers() []string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	peers := make([]string, 0, len(n.peers))
+	for peerID := range n.peers {
+		peers = append(peers, peerID)
+	}
+	return peers
+}
+
+// RegisterPeer adds a peer to the node's peer list
+func (n *OracleNode) RegisterPeer(peerID, address string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.peers[peerID] = address
+	return nil
+}
+
+// Start initializes and starts the node
 func (n *OracleNode) Start(ctx context.Context) error {
 	n.mu.Lock()
 	if n.isRunning {
