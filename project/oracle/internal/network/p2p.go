@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -12,21 +13,24 @@ import (
 
 // P2PTransport implements the Transport interface
 type P2PTransport struct {
-	mu           sync.RWMutex
-	nodeID       string
-	address      string
-	peers        map[string]string // nodeID -> address
-	listener     net.Listener
-	connections  map[string]net.Conn
-	msgChan      chan *Message
-	doneChan     chan struct{}
-	retryConfig  *RetryConfig
-	reconnecting map[string]bool
+	mu            sync.RWMutex
+	nodeID        string
+	address       string
+	peers         map[string]string // nodeID -> address
+	listener      net.Listener
+	connections   map[string]net.Conn
+	msgChan       chan *Message
+	doneChan      chan struct{}
+	retryConfig   *RetryConfig
+	reconnecting  map[string]bool
+	healthManager *HealthManager
+	discovery     *PeerDiscovery
+	version       string
 }
 
 // NewP2PTransport creates a new P2P transport
-func NewP2PTransport(nodeID, address string) *P2PTransport {
-	return &P2PTransport{
+func NewP2PTransport(nodeID, address, version string) *P2PTransport {
+	t := &P2PTransport{
 		nodeID:       nodeID,
 		address:      address,
 		peers:        make(map[string]string),
@@ -35,26 +39,31 @@ func NewP2PTransport(nodeID, address string) *P2PTransport {
 		doneChan:     make(chan struct{}),
 		retryConfig:  DefaultRetryConfig(),
 		reconnecting: make(map[string]bool),
+		version:      version,
 	}
+
+	t.healthManager = NewHealthManager(t)
+	t.discovery = NewPeerDiscovery(t, version)
+	return t
 }
 
 func (t *P2PTransport) Start(ctx context.Context) error {
-	listener, err := net.Listen("tcp", t.address)
-	if err != nil {
-		return fmt.Errorf("failed to start listener: %w", err)
+	if err := t.startListener(); err != nil {
+		return err
 	}
-	t.listener = listener
+
+	t.healthManager.Start()
+	t.discovery.Start()
 
 	go t.acceptConnections(ctx)
 	return nil
 }
 
 func (t *P2PTransport) Stop() error {
+	t.healthManager.Stop()
+	t.discovery.Stop()
 	close(t.doneChan)
-	if t.listener != nil {
-		return t.listener.Close()
-	}
-	return nil
+	return t.listener.Close()
 }
 
 func (t *P2PTransport) Send(to string, payload []byte) error {
@@ -251,4 +260,38 @@ func (t *P2PTransport) closeConnection(peerID string) {
 func (t *P2PTransport) reconnect(peerID string) error {
 	t.closeConnection(peerID)
 	return t.connect(peerID)
+}
+
+func (t *P2PTransport) handleMessage(msg *Message) error {
+	var rawMsg map[string]interface{}
+	if err := json.Unmarshal(msg.Payload, &rawMsg); err != nil {
+		return err
+	}
+
+	msgType, ok := rawMsg["type"].(string)
+	if !ok {
+		return fmt.Errorf("invalid message type")
+	}
+
+	switch msgType {
+	case "discovery":
+		var discoveryMsg DiscoveryMessage
+		if err := json.Unmarshal(msg.Payload, &discoveryMsg); err != nil {
+			return err
+		}
+		t.discovery.HandleDiscoveryMessage(&discoveryMsg)
+	case "ping":
+		// Send pong response
+		pong := &HealthCheck{
+			Type:   "pong",
+			Time:   time.Now().UnixNano(),
+			NodeID: t.nodeID,
+		}
+		data, _ := json.Marshal(pong)
+		return t.Send(msg.From, data)
+	default:
+		return t.msgHandler(msg)
+	}
+
+	return nil
 }
