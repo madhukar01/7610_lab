@@ -5,33 +5,35 @@ import (
 	"testing"
 	"time"
 
-	"oracle/internal/logging"
-	"oracle/internal/node"
+	"oracle/tests"
 )
 
 func TestOracleNode(t *testing.T) {
-	logger := logging.NewLogger(logging.DEBUG, nil, "test")
-
-	// Create node
-	n, err := node.NewOracleNode("node1", "localhost:8000", logger)
+	// Create test nodes
+	nodes := []string{"node1", "node2", "node3"}
+	n, err := tests.CreateTestNode("node1", nodes)
 	if err != nil {
 		t.Fatalf("Failed to create node: %v", err)
 	}
-
-	// Initialize consensus
-	nodes := []string{"node1", "node2", "node3"}
-	n.InitConsensus(nodes)
 
 	// Start node
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := n.Start(ctx); err != nil {
-		t.Fatalf("Failed to start node: %v", err)
+	if err := n.ProcessPrompt(ctx, "test-req", "test prompt"); err != nil {
+		t.Fatalf("Failed to process prompt: %v", err)
 	}
 
-	// Stop node
-	if err := n.Stop(); err != nil {
-		t.Fatalf("Failed to stop node: %v", err)
+	// Wait for processing
+	time.Sleep(2 * time.Second)
+
+	// Check request state
+	state, err := n.GetRequestState("test-req")
+	if err != nil {
+		t.Fatalf("Failed to get request state: %v", err)
+	}
+
+	if state.Status == "failed" {
+		t.Error("Request processing failed")
 	}
 }

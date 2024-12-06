@@ -19,6 +19,15 @@ const (
 	StateTransfer
 )
 
+// PBFTState represents the state of a PBFT node
+type PBFTState int
+
+const (
+	StateNormal PBFTState = iota
+	StateViewChange
+	StateStateTransfer
+)
+
 // ConsensusMessage represents a message in the consensus protocol
 type ConsensusMessage struct {
 	Type     MessageType `json:"type"`
@@ -43,14 +52,6 @@ type ConsensusResult struct {
 	Data     []byte `json:"data"`
 	Digest   []byte `json:"digest"`
 }
-
-// NodeState represents the state of a PBFT node
-type NodeState int
-
-const (
-	StateNormal NodeState = iota
-	StateViewChange
-)
 
 // ViewChangeMessage represents a view change message
 type ViewChangeMessage struct {
@@ -98,7 +99,7 @@ type PBFT struct {
 	// State
 	view              uint64
 	sequence          uint64
-	state             NodeState
+	state             PBFTState
 	isLeader          bool
 	lastCheckpoint    []byte
 	lastCheckpointSeq uint64

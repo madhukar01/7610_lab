@@ -91,20 +91,26 @@ func (t *P2PTransport) Stop() error {
 	defer t.mu.Unlock()
 
 	// Signal shutdown
-	close(t.doneChan)
+	select {
+	case <-t.doneChan:
+		// Already closed
+		return nil
+	default:
+		close(t.doneChan)
+	}
 
 	// Close listener
 	if t.listener != nil {
 		t.listener.Close()
 	}
 
-	// Close all connections
-	for _, conn := range t.connections {
+	// Close all connections gracefully
+	for peerID, conn := range t.connections {
+		// Set a short deadline to allow pending writes to complete
+		conn.SetDeadline(time.Now().Add(100 * time.Millisecond))
 		conn.Close()
+		delete(t.connections, peerID)
 	}
-
-	// Clear connections map
-	t.connections = make(map[string]net.Conn)
 
 	return nil
 }
@@ -162,7 +168,7 @@ func (t *P2PTransport) Send(peerID string, payload []byte) error {
 	return nil
 }
 
-func (t *P2PTransport) Broadcast(payload []byte) error {
+func (t *P2PTransport) Broadcast(msg []byte) error {
 	t.mu.RLock()
 	peers := make([]string, 0, len(t.peers))
 	for peerID := range t.peers {
@@ -171,8 +177,8 @@ func (t *P2PTransport) Broadcast(payload []byte) error {
 	t.mu.RUnlock()
 
 	for _, peerID := range peers {
-		if err := t.Send(peerID, payload); err != nil {
-			log.Printf("Failed to send to peer %s: %v", peerID, err)
+		if err := t.Send(peerID, msg); err != nil {
+			return fmt.Errorf("failed to send to peer %s: %w", peerID, err)
 		}
 	}
 
@@ -206,7 +212,13 @@ func (t *P2PTransport) handleConnection(conn net.Conn) {
 		conn.Close()
 		if peerID != "" {
 			t.closeConnection(peerID)
-			t.handleConnectionFailure(peerID)
+			// Only attempt reconnection if we're not shutting down
+			select {
+			case <-t.doneChan:
+				return
+			default:
+				t.handleConnectionFailure(peerID)
+			}
 		}
 	}()
 
@@ -217,7 +229,7 @@ func (t *P2PTransport) handleConnection(conn net.Conn) {
 		default:
 			msg, err := ReadMessage(conn)
 			if err != nil {
-				if err != io.EOF {
+				if err != io.EOF && !isConnectionClosed(err) && !strings.Contains(err.Error(), "i/o timeout") {
 					log.Printf("Failed to read message: %v", err)
 				}
 				return
@@ -228,6 +240,30 @@ func (t *P2PTransport) handleConnection(conn net.Conn) {
 			case <-t.doneChan:
 				return
 			}
+		}
+	}
+}
+
+// isConnectionClosed checks if the error is due to a closed connection
+func isConnectionClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection refused")
+}
+
+func (t *P2PTransport) handleConnectionFailure(peerID string) {
+	// Don't log reconnection errors during shutdown
+	select {
+	case <-t.doneChan:
+		return
+	default:
+		if err := t.connectWithRetry(peerID); err != nil && !isConnectionClosed(err) {
+			log.Printf("Failed to reconnect to peer %s: %v", peerID, err)
 		}
 	}
 }
@@ -261,14 +297,6 @@ func (t *P2PTransport) connectWithRetry(peerID string) error {
 
 	go t.handleConnection(conn)
 	return nil
-}
-
-func (t *P2PTransport) handleConnectionFailure(peerID string) {
-	go func() {
-		if err := t.connectWithRetry(peerID); err != nil {
-			log.Printf("Failed to reconnect to peer %s: %v", peerID, err)
-		}
-	}()
 }
 
 func (t *P2PTransport) connect(peerID string) error {

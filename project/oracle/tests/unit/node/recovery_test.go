@@ -9,6 +9,7 @@ import (
 
 	"oracle/internal/logging"
 	"oracle/internal/node"
+	"oracle/tests"
 )
 
 func TestRecovery(t *testing.T) {
@@ -20,20 +21,17 @@ func TestRecovery(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	statePath := filepath.Join(tmpDir, "state.json")
-	logger := logging.NewLogger(logging.DEBUG, nil, "test")
+	logger := logging.NewLogger(logging.DEBUG, os.Stdout, "test")
 
 	// Create test node
-	n, err := node.NewOracleNode("test-node", "localhost:8000", logger)
+	nodes := []string{"test-node", "peer1", "peer2"}
+	testNode, err := tests.CreateTestNode("test-node", nodes)
 	if err != nil {
 		t.Fatalf("Failed to create node: %v", err)
 	}
 
-	// Initialize consensus
-	nodes := []string{"test-node", "peer1", "peer2"}
-	n.InitConsensus(nodes)
-
-	// Create recovery
-	recovery := node.NewRecovery(n, statePath, logger)
+	// Create recovery using the wrapped OracleNode
+	recovery := node.NewRecovery(testNode.OracleNode, statePath, logger)
 
 	// Test saving state
 	if err := recovery.SaveState(); err != nil {

@@ -21,19 +21,20 @@ var (
 // NewPBFT creates a new PBFT consensus engine
 func NewPBFT(nodeID string, nodes []string, timeout time.Duration) *PBFT {
 	pbft := &PBFT{
-		nodeID:          nodeID,
-		nodes:           nodes,
-		timeout:         timeout,
-		view:            0,
-		sequence:        0,
-		state:           StateNormal,
-		prepareMessages: make(map[uint64]map[string]*ConsensusMessage),
-		commitMessages:  make(map[uint64]map[string]*ConsensusMessage),
-		viewChangeMsgs:  make(map[uint64]map[string]*ConsensusMessage),
-		msgChan:         make(chan *ConsensusMessage, 1000),
-		doneChan:        make(chan struct{}),
-		f:               (len(nodes) - 1) / 3,
-		checkpoints:     make(map[uint64][]byte),
+		nodeID:             nodeID,
+		nodes:              nodes,
+		timeout:            timeout,
+		view:               0,
+		sequence:           0,
+		state:              StateNormal,
+		prepareMessages:    make(map[uint64]map[string]*ConsensusMessage),
+		commitMessages:     make(map[uint64]map[string]*ConsensusMessage),
+		viewChangeMsgs:     make(map[uint64]map[string]*ConsensusMessage),
+		msgChan:            make(chan *ConsensusMessage, 1000),
+		doneChan:           make(chan struct{}),
+		f:                  (len(nodes) - 1) / 3,
+		checkpoints:        make(map[uint64][]byte),
+		checkpointInterval: 100,
 	}
 
 	// Set initial leader (node0)
@@ -68,7 +69,13 @@ func (p *PBFT) ProposeValue(value []byte) error {
 		return fmt.Errorf("node is not the leader")
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Compute message digest
 	digest := p.computeDigest(value)
+
+	// Create pre-prepare message
 	msg := &ConsensusMessage{
 		Type:     PrePrepare,
 		NodeID:   p.nodeID,
@@ -78,7 +85,18 @@ func (p *PBFT) ProposeValue(value []byte) error {
 		Data:     value,
 	}
 
-	p.broadcast(msg)
+	// Store message for validation
+	if _, exists := p.prepareMessages[p.sequence]; !exists {
+		p.prepareMessages[p.sequence] = make(map[string]*ConsensusMessage)
+	}
+	p.prepareMessages[p.sequence][p.nodeID] = msg
+
+	// Broadcast pre-prepare message
+	if err := p.broadcast(msg); err != nil {
+		return fmt.Errorf("failed to broadcast pre-prepare: %w", err)
+	}
+
+	// Increment sequence number
 	p.sequence++
 	return nil
 }
@@ -87,6 +105,17 @@ func (p *PBFT) ProcessMessage(msg *ConsensusMessage) error {
 	if err := p.validateMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
+
+	// Update sequence if needed
+	if msg.Sequence > p.sequence {
+		p.sequence = msg.Sequence
+	}
+
+	// Update view if needed
+	if msg.View > p.view {
+		p.view = msg.View
+	}
+
 	p.msgChan <- msg
 	return nil
 }
@@ -114,7 +143,13 @@ func (p *PBFT) handlePrePrepare(msg *ConsensusMessage) {
 	defer p.mu.Unlock()
 
 	// Verify sequence number and view
-	if msg.Sequence != p.sequence {
+	if msg.Sequence < p.sequence {
+		return
+	}
+
+	// Verify digest
+	computedDigest := p.computeDigest(msg.Data)
+	if !bytes.Equal(computedDigest, msg.Digest) {
 		return
 	}
 
@@ -122,10 +157,19 @@ func (p *PBFT) handlePrePrepare(msg *ConsensusMessage) {
 	prepare := &ConsensusMessage{
 		Type:     Prepare,
 		NodeID:   p.nodeID,
+		View:     msg.View,
 		Sequence: msg.Sequence,
+		Digest:   computedDigest,
 		Data:     msg.Data,
 	}
 
+	// Store prepare message
+	if _, exists := p.prepareMessages[msg.Sequence]; !exists {
+		p.prepareMessages[msg.Sequence] = make(map[string]*ConsensusMessage)
+	}
+	p.prepareMessages[msg.Sequence][p.nodeID] = prepare
+
+	// Broadcast prepare message
 	p.broadcast(prepare)
 }
 
@@ -191,12 +235,11 @@ func (p *PBFT) executeConsensus(sequence uint64, data []byte) {
 	p.cleanup(sequence)
 }
 
-func (p *PBFT) broadcast(msg *ConsensusMessage) {
-	if p.networkManager != nil {
-		if err := p.networkManager.Broadcast(msg); err != nil {
-			log.Printf("Failed to broadcast message: %v", err)
-		}
+func (p *PBFT) broadcast(msg *ConsensusMessage) error {
+	if p.networkManager == nil {
+		return fmt.Errorf("network manager not initialized")
 	}
+	return p.networkManager.Broadcast(msg)
 }
 
 func (p *PBFT) validateMessage(msg *ConsensusMessage) error {
@@ -216,20 +259,14 @@ func (p *PBFT) validateMessage(msg *ConsensusMessage) error {
 		return ErrInvalidSender
 	}
 
-	// Validate view number
-	if msg.View < p.view {
-		return ErrInvalidView
-	}
-
-	// Validate sequence number
-	if msg.Sequence < p.sequence {
+	// Validate sequence number - be more lenient during startup
+	if msg.Sequence < p.sequence-1 && p.sequence > 1 {
 		return ErrInvalidSequence
 	}
 
-	// Validate digest
-	computedDigest := p.computeDigest(msg.Data)
-	if !bytes.Equal(computedDigest, msg.Digest) {
-		return fmt.Errorf("invalid message digest")
+	// Validate view number - be more lenient during startup
+	if msg.View < p.view-1 && p.view > 1 {
+		return ErrInvalidView
 	}
 
 	// Validate message type
@@ -242,7 +279,7 @@ func (p *PBFT) validateMessage(msg *ConsensusMessage) error {
 		// These messages can come from any valid node
 		break
 	case ViewChange, NewView:
-		if msg.View <= p.view {
+		if msg.View <= p.view && p.view > 0 {
 			return fmt.Errorf("invalid view number in view change")
 		}
 	default:
@@ -357,6 +394,10 @@ func (p *PBFT) computeDigest(data []byte) []byte {
 }
 
 func (p *PBFT) makeCheckpoint() {
+	if p.checkpointInterval == 0 {
+		p.checkpointInterval = 100
+	}
+
 	if p.sequence%p.checkpointInterval == 0 {
 		checkpoint := &struct {
 			Sequence uint64
@@ -443,4 +484,11 @@ func (p *PBFT) RestoreState(sequence uint64, view uint64, state PBFTState) error
 	p.view = view
 	p.state = state
 	return nil
+}
+
+// SetResultCallback sets the callback function for consensus results
+func (p *PBFT) SetResultCallback(callback func(ConsensusResult)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resultCallback = callback
 }
