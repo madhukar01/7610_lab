@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"agent/src/llm"
-	"oracle/internal/logging"
-	"oracle/internal/node"
-	"oracle/internal/similarity"
-	"oracle/internal/storage"
+	"github.com/mhollas/7610/agent/llm"
+	"github.com/mhollas/7610/oracle/pkg/logging"
+	"github.com/mhollas/7610/oracle/pkg/node"
+	"github.com/mhollas/7610/oracle/pkg/similarity"
+	"github.com/mhollas/7610/oracle/pkg/storage"
 )
 
 // MockLLMClient implements a mock LLM client for testing

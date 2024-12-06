@@ -22,9 +22,12 @@ type GlobalConfig struct {
 			} `json:"consensus"`
 		} `json:"network"`
 		Storage struct {
-			Web3StorageToken string `json:"web3_storage_token"`
-			RetryAttempts    int    `json:"retry_attempts"`
-			RetryDelay       int    `json:"retry_delay"`
+			Provider string `json:"provider"`
+			Pinata   struct {
+				APIKey    string `json:"api_key"`
+				APISecret string `json:"api_secret"`
+				JWT       string `json:"jwt"`
+			} `json:"pinata"`
 		} `json:"storage"`
 	} `json:"oracle"`
 
@@ -32,6 +35,7 @@ type GlobalConfig struct {
 		OpenAI struct {
 			APIKey             string  `json:"api_key"`
 			Model              string  `json:"model"`
+			Temperature        float32 `json:"temperature"`
 			MaxTokens          int     `json:"max_tokens"`
 			DefaultTemperature float32 `json:"default_temperature"`
 			MaxRetries         int     `json:"max_retries"`
@@ -66,6 +70,16 @@ type GlobalConfig struct {
 		KeyFile           string `json:"key_file"`
 		AuthTokenExpiryMs int    `json:"auth_token_expiry_ms"`
 	} `json:"security"`
+
+	Invoker struct {
+		Network         string `json:"network"`
+		RPCURL          string `json:"rpc_url"`
+		ChainID         int    `json:"chain_id"`
+		ContractAddress string `json:"contract_address"`
+		PrivateKey      string `json:"private_key"`
+		GasLimit        int    `json:"gas_limit"`
+		Confirmations   int    `json:"confirmations"`
+	} `json:"invoker"`
 }
 
 var (
@@ -143,9 +157,9 @@ func loadEnvVars(cfg *GlobalConfig) {
 		cfg.LLM.OpenAI.APIKey = apiKey
 	}
 
-	// Load Web3.Storage token from environment if set
-	if token := os.Getenv("WEB3_STORAGE_TOKEN"); token != "" {
-		cfg.Oracle.Storage.Web3StorageToken = token
+	// Load Pinata JWT from environment if set
+	if jwt := os.Getenv("PINATA_JWT"); jwt != "" {
+		cfg.Oracle.Storage.Pinata.JWT = jwt
 	}
 
 	// Load RPC URL from environment if set

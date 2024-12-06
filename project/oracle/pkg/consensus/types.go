@@ -1,10 +1,11 @@
 package consensus
 
 import (
-	"agent/src/llm"
 	"crypto/ecdsa"
 	"sync"
 	"time"
+
+	"github.com/mhollas/7610/agent/llm"
 )
 
 // MessageType represents the type of consensus message
@@ -105,10 +106,11 @@ type PBFT struct {
 	lastCheckpointSeq uint64
 
 	// Messages
-	prepareMessages map[uint64]map[string]*ConsensusMessage
-	commitMessages  map[uint64]map[string]*ConsensusMessage
-	viewChangeMsgs  map[uint64]map[string]*ConsensusMessage
-	checkpoints     map[uint64][]byte
+	prepareMessages  map[uint64]map[string]*ConsensusMessage
+	commitMessages   map[uint64]map[string]*ConsensusMessage
+	viewChangeMsgs   map[uint64]map[string]*ConsensusMessage
+	checkpoints      map[uint64][]byte
+	consensusReached map[uint64]bool // Track which sequences have reached consensus
 
 	// Channels
 	msgChan  chan *ConsensusMessage

@@ -4,72 +4,110 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
-	"agent/src/llm"
-	"oracle/internal/consensus"
-	"oracle/internal/logging"
-	"oracle/internal/node"
-	"oracle/internal/similarity"
-	"oracle/internal/storage"
+	"github.com/mhollas/7610/agent/llm"
+	"github.com/mhollas/7610/oracle/pkg/consensus"
+	"github.com/mhollas/7610/oracle/pkg/logging"
+	"github.com/mhollas/7610/oracle/pkg/node"
+	"github.com/mhollas/7610/oracle/pkg/similarity"
+	"github.com/mhollas/7610/oracle/pkg/storage"
 )
 
 func TestOracleConsensus(t *testing.T) {
+	// Read config file
+	configFile, err := os.ReadFile("../../../config/config.json")
+	if err != nil {
+		t.Fatalf("Failed to read config file: %v", err)
+	}
+
+	var config struct {
+		Oracle struct {
+			Storage struct {
+				Provider string `json:"provider"`
+				Pinata   struct {
+					APIKey    string `json:"api_key"`
+					APISecret string `json:"api_secret"`
+					JWT       string `json:"jwt"`
+				} `json:"pinata"`
+			} `json:"storage"`
+		} `json:"oracle"`
+		LLM struct {
+			OpenAI struct {
+				APIKey          string  `json:"api_key"`
+				Model           string  `json:"model"`
+				Temperature     float32 `json:"temperature"`
+				MaxTokens       int     `json:"max_tokens"`
+				MaxRetries      int     `json:"max_retries"`
+				RetryIntervalMS int     `json:"retry_interval_ms"`
+			} `json:"openai"`
+		} `json:"llm"`
+	}
+
+	if err := json.Unmarshal(configFile, &config); err != nil {
+		t.Fatalf("Failed to parse config: %v", err)
+	}
+
 	// Create test nodes
-	nodeIDs := []string{"node1", "node2", "node3", "node4"}
+	nodeIDs := []string{"leader", "peer1", "peer2", "peer3", "peer4", "peer5", "peer6"}
 	nodes := make([]*node.OracleNode, len(nodeIDs))
 	addresses := make(map[string]string)
 
 	fmt.Println("\n=== Starting Oracle Consensus Test ===")
-	fmt.Println("Creating", len(nodeIDs), "nodes...")
+	fmt.Printf("Creating leader node with %d peers (f = %d, total = 3f + 1)...\n", len(nodeIDs)-1, (len(nodeIDs)-1)/3)
 
-	// Create shared components
+	// Create shared components for leader
 	cfg := &llm.Config{
-		Model:              "gpt-4-1106-preview",
-		MaxTokens:          1000,
-		DefaultTemperature: 0.7,
-		MaxRetries:         3,
-		RetryIntervalMs:    1000,
+		Model:              config.LLM.OpenAI.Model,
+		MaxTokens:          config.LLM.OpenAI.MaxTokens,
+		DefaultTemperature: config.LLM.OpenAI.Temperature,
+		MaxRetries:         config.LLM.OpenAI.MaxRetries,
+		RetryIntervalMs:    config.LLM.OpenAI.RetryIntervalMS,
 	}
 
 	// Initialize nodes
 	for i, nodeID := range nodeIDs {
-		// Create LLM client
-		llmClient, err := llm.NewOpenAIClient("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", cfg)
-		if err != nil {
-			t.Fatalf("Failed to create LLM client: %v", err)
-		}
+		var oracleNode *node.OracleNode
+		var err error
 
-		// Create storage client
-		storageClient, err := storage.NewPinataClient(
-			"08c14515d80ee5db9865",
-			"fb3ed454a66f0615242d7711f0ba1d788c153b6afe47a8aaeef9f11ae179f253",
-			"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySW5mb3JtYXRpb24iOnsiaWQiOiI2ZjdiOGMxOS0yOGJhLTRlMGUtOGZkYi1jNjUyZGNkYWY2ZTMiLCJlbWFpbCI6Im1ob2xsYThAZ21haWwuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsInBpbl9wb2xpY3kiOnsicmVnaW9ucyI6W3siZGVzaXJlZFJlcGxpY2F0aW9uQ291bnQiOjEsImlkIjoiRlJBMSJ9LHsiZGVzaXJlZFJlcGxpY2F0aW9uQ291bnQiOjEsImlkIjoiTllDMSJ9XSwidmVyc2lvbiI6MX0sIm1mYV9lbmFibGVkIjpmYWxzZSwic3RhdHVzIjoiQUNUSVZFIn0sImF1dGhlbnRpY2F0aW9uVHlwZSI6InNjb3BlZEtleSIsInNjb3BlZEtleUtleSI6IjA4YzE0NTE1ZDgwZWU1ZGI5ODY1Iiwic2NvcGVkS2V5U2VjcmV0IjoiZmIzZWQ0NTRhNjZmMDYxNTI0MmQ3NzExZjBiYTFkNzg4YzE1M2I2YWZlNDdhOGFhZWVmOWYxMWFlMTc5ZjI1MyIsImV4cCI6MTc2NDY2OTQzNX0.Pq8OfbhJF4CALIXO0pT3RyZAPBHQrbLU9p-qbq_3E4s",
-		)
-		if err != nil {
-			t.Fatalf("Failed to create storage client: %v", err)
-		}
-
-		// Create semantic scorer
-		scorer := similarity.NewSemanticScorer("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", "")
-
-		// Create logger
-		logger := logging.NewLogger(logging.DEBUG, nil, fmt.Sprintf("node-%s", nodeID))
-
-		// Create node
+		// Create node address
 		addr := fmt.Sprintf("localhost:%d", 8545+i)
 		addresses[nodeID] = addr
 
-		node, err := node.NewOracleNode(nodeID, addr, llmClient, storageClient, scorer, logger)
+		// Create LLM client for all nodes
+		llmClient, err := llm.NewOpenAIClient(config.LLM.OpenAI.APIKey, cfg)
+		if err != nil {
+			t.Fatalf("Failed to create LLM client for node %s: %v", nodeID, err)
+		}
+
+		// Create real Pinata storage client
+		storageClient, err := storage.NewPinataClient(
+			config.Oracle.Storage.Pinata.APIKey,
+			config.Oracle.Storage.Pinata.APISecret,
+			config.Oracle.Storage.Pinata.JWT,
+		)
+		if err != nil {
+			t.Fatalf("Failed to create storage client for node %s: %v", nodeID, err)
+		}
+
+		// Create semantic scorer
+		scorer := similarity.NewSemanticScorer(config.LLM.OpenAI.APIKey, "")
+
+		// Create logger
+		logger := logging.NewLogger(logging.DEBUG, nil, nodeID)
+
+		// Create node with all capabilities
+		oracleNode, err = node.NewOracleNode(nodeID, addr, llmClient, storageClient, scorer, logger)
 		if err != nil {
 			t.Fatalf("Failed to create node %s: %v", nodeID, err)
 		}
+		fmt.Printf("Created node %s at %s with storage capabilities\n", nodeID, addr)
 
-		// Initialize consensus
-		node.InitConsensus(nodeIDs)
-		nodes[i] = node
-		fmt.Printf("Created node: %s at %s\n", nodeID, addr)
+		// Initialize consensus for all nodes
+		oracleNode.InitConsensus(nodeIDs)
+		nodes[i] = oracleNode
 	}
 
 	// Register peers with each other
@@ -127,10 +165,8 @@ func TestOracleConsensus(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Test prompt
-	prompt := "What is the capital of France? Answer in one sentence."
+	prompt := "Tell me a short poem about Moon. Be creative."
 	requestID := "test-consensus-1"
-
-	fmt.Printf("\nSubmitting prompt to leader node: '%s'\n", prompt)
 
 	// Define leader node
 	leaderNode := nodes[0]
@@ -175,14 +211,37 @@ func TestOracleConsensus(t *testing.T) {
 		}
 	}()
 
-	// Submit prompt to leader node only
-	err := leaderNode.ProcessPrompt(ctx, requestID, prompt)
-	if err != nil {
-		t.Fatalf("Failed to process prompt on leader node: %v", err)
+	// Submit prompt to all nodes and collect initial responses
+	fmt.Printf("\nSubmitting prompt to all nodes: '%s'\n", prompt)
+	initialResponses := make(map[string]string)
+	for _, node := range nodes {
+		if err := node.ProcessPrompt(ctx, requestID, prompt); err != nil {
+			t.Fatalf("Failed to process prompt on node %s: %v", node.GetNodeID(), err)
+		}
+		fmt.Printf("Submitted prompt to node %s\n", node.GetNodeID())
+
+		// Wait a bit for LLM response
+		time.Sleep(2 * time.Second)
+
+		// Get initial response
+		state, err := node.GetRequestState(requestID)
+		if err != nil {
+			t.Fatalf("Failed to get initial state from node %s: %v", node.GetNodeID(), err)
+		}
+		if state.LLMResponse != nil {
+			initialResponses[node.GetNodeID()] = state.LLMResponse.Text
+			fmt.Printf("\nInitial response from %s: %s\n", node.GetNodeID(), state.LLMResponse.Text)
+		}
 	}
 
 	fmt.Println("\nWaiting for consensus...")
 	time.Sleep(10 * time.Second)
+
+	// Print initial responses
+	fmt.Println("\n=== Initial Node Responses (Before Consensus) ===")
+	for nodeID, response := range initialResponses {
+		fmt.Printf("\nNode %s initial response:\n%s\n", nodeID, response)
+	}
 
 	// Verify PBFT message flow
 	fmt.Println("\n=== PBFT Message Flow ===")
@@ -260,6 +319,8 @@ func TestOracleConsensus(t *testing.T) {
 
 	// Check results from each node
 	fmt.Println("\n=== Node Responses ===")
+	allResponses := make(map[string]string)
+
 	for i, node := range nodes {
 		state, err := node.GetRequestState(requestID)
 		if err != nil {
@@ -269,20 +330,13 @@ func TestOracleConsensus(t *testing.T) {
 		fmt.Printf("\nNode: %s\n", nodeIDs[i])
 		fmt.Printf("Status: %s\n", state.Status)
 
+		// Store response from LLM response only (not consensus data)
 		if state.LLMResponse != nil {
 			fmt.Printf("LLM Response: %s\n", state.LLMResponse.Text)
+			allResponses[nodeIDs[i]] = state.LLMResponse.Text
 		}
 
-		if state.Clusters != nil && len(state.Clusters) > 0 {
-			fmt.Println("\nSemantic Clusters:")
-			for i, cluster := range state.Clusters {
-				fmt.Printf("\nCluster %d (Average Score: %.3f):\n", i+1, cluster.AverageScore)
-				for _, resp := range cluster.Responses {
-					fmt.Printf("- [%s] %s\n", resp.NodeID, resp.Text)
-				}
-			}
-		}
-
+		// Print consensus data separately
 		if state.ConsensusData != nil {
 			fmt.Println("\nConsensus Data:")
 			data, _ := json.MarshalIndent(state.ConsensusData, "", "  ")
@@ -291,6 +345,103 @@ func TestOracleConsensus(t *testing.T) {
 
 		if state.IPFSCID != "" {
 			fmt.Printf("\nIPFS CID: %s\n", state.IPFSCID)
+		}
+	}
+
+	// Print semantic similarity matrix only if we have unique responses
+	var similarityMatrix map[string]map[string]float32
+	var messageStats map[string]map[consensus.MessageType]int
+
+	if len(allResponses) > 0 {
+		fmt.Println("\n=== Individual Node Responses ===")
+		for nodeID, response := range allResponses {
+			fmt.Printf("\nNode %s LLM response:\n%s\n", nodeID, response)
+		}
+
+		fmt.Println("\n=== Semantic Similarity Matrix ===")
+		// Print header row
+		fmt.Printf("%-10s", "Node")
+		for nodeID := range allResponses {
+			displayID := nodeID
+			if len(nodeID) > 10 {
+				displayID = nodeID[:10]
+			}
+			fmt.Printf("| %-8s ", displayID)
+		}
+		fmt.Println("|")
+
+		// Print separator
+		fmt.Printf("%-10s", "----------")
+		for range allResponses {
+			fmt.Printf("|%s", "---------")
+		}
+		fmt.Println("|")
+
+		// Create scorer for similarity calculation
+		scorer := similarity.NewSemanticScorer(config.LLM.OpenAI.APIKey, "")
+
+		// Get embeddings for all responses
+		embeddings := make(map[string][]float32)
+		for nodeID, resp := range allResponses {
+			embedding, err := scorer.GetEmbedding(context.Background(), resp)
+			if err != nil {
+				t.Logf("Failed to get embedding for node %s: %v", nodeID, err)
+				continue
+			}
+			embeddings[nodeID] = embedding
+			fmt.Printf("Got embedding for node %s, length: %d\n", nodeID, len(embedding))
+		}
+
+		// Print similarity scores
+		similarityMatrix = make(map[string]map[string]float32)
+		for nodeID1 := range allResponses {
+			similarityMatrix[nodeID1] = make(map[string]float32)
+			displayID := nodeID1
+			if len(nodeID1) > 10 {
+				displayID = nodeID1[:10]
+			}
+			fmt.Printf("%-10s", displayID)
+			for nodeID2 := range allResponses {
+				if nodeID1 == nodeID2 {
+					fmt.Printf("| %-8s ", "1.000")
+					similarityMatrix[nodeID1][nodeID2] = 1.0
+					continue
+				}
+
+				// Get embeddings
+				emb1, ok1 := embeddings[nodeID1]
+				emb2, ok2 := embeddings[nodeID2]
+				if !ok1 || !ok2 {
+					fmt.Printf("| %-8s ", "error")
+					continue
+				}
+
+				// Calculate similarity
+				score := similarity.CosineSimilarity(emb1, emb2)
+				similarityMatrix[nodeID1][nodeID2] = score
+				fmt.Printf("| %-8.3f ", score)
+			}
+			fmt.Println("|")
+		}
+
+		// Collect message statistics
+		messageStats = make(map[string]map[consensus.MessageType]int)
+		for nodeID, messages := range messagesByNode {
+			if messageStats[nodeID] == nil {
+				messageStats[nodeID] = make(map[consensus.MessageType]int)
+			}
+			for _, msgType := range messages {
+				messageStats[nodeID][msgType]++
+			}
+		}
+
+		// Print message statistics
+		fmt.Println("\n=== Message Statistics ===")
+		for nodeID, stats := range messageStats {
+			fmt.Printf("\nNode %s:\n", nodeID)
+			fmt.Printf("PrePrepare messages: %d\n", stats[consensus.PrePrepare])
+			fmt.Printf("Prepare messages: %d\n", stats[consensus.Prepare])
+			fmt.Printf("Commit messages: %d\n", stats[consensus.Commit])
 		}
 	}
 
@@ -315,6 +466,53 @@ func TestOracleConsensus(t *testing.T) {
 	if consensusReached {
 		fmt.Println("✅ Consensus reached successfully!")
 		fmt.Printf("Final response: %s\n", finalResponse)
+
+		// Store final results in IPFS
+		finalResults := &storage.ExecutionRecord{
+			RequestID:    requestID,
+			RequestInput: prompt,
+			Timestamp:    time.Now(),
+			OracleResponses: func() []storage.OracleResponse {
+				responses := make([]storage.OracleResponse, 0, len(allResponses))
+				for nodeID, text := range allResponses {
+					responses = append(responses, storage.OracleResponse{
+						NodeID:      nodeID,
+						LLMResponse: text,
+						Timestamp:   time.Now(),
+						Metadata: map[string]interface{}{
+							"messageStats": messageStats[nodeID],
+						},
+					})
+				}
+				return responses
+			}(),
+			Consensus: storage.ConsensusData{
+				Method:           "PBFT",
+				ParticipantCount: len(nodes),
+				AgreementScore:   1.0,
+				Round:            1,
+			},
+			FinalResponse: finalResponse,
+			ExtraMetadata: map[string]interface{}{
+				"messageStats":     messageStats,
+				"similarityMatrix": similarityMatrix,
+			},
+		}
+
+		// Store using the first node's storage client
+		if storageClient, ok := nodes[0].GetStorage().(storage.StorageClient); ok {
+			cid, err := storageClient.StoreExecutionRecord(context.Background(), finalResults)
+			if err != nil {
+				t.Logf("Warning: Failed to store final test results: %v", err)
+			} else {
+				fmt.Printf("\n=== Final Results Stored ===\nIPFS CID: %s\n", cid)
+				fmt.Println("\nStored data includes:")
+				fmt.Println("- Individual node responses")
+				fmt.Println("- Semantic similarity matrix")
+				fmt.Println("- Message statistics per node")
+				fmt.Println("- Final consensus response")
+			}
+		}
 	} else {
 		t.Error("❌ Consensus failed - nodes have different final values")
 	}

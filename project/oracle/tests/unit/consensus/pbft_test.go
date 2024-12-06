@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"oracle/internal/consensus"
-	"oracle/internal/network"
+	"github.com/mhollas/7610/oracle/pkg/consensus"
+	"github.com/mhollas/7610/oracle/pkg/network"
 )
 
 func TestPBFTConsensus(t *testing.T) {

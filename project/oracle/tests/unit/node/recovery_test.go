@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"oracle/internal/logging"
-	"oracle/internal/node"
-	"oracle/tests"
+	"github.com/mhollas/7610/oracle/pkg/logging"
+	"github.com/mhollas/7610/oracle/pkg/node"
+	"github.com/mhollas/7610/oracle/tests"
 )
 
 func TestRecovery(t *testing.T) {

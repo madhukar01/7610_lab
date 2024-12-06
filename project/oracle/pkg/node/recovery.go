@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"oracle/internal/consensus"
-	"oracle/internal/logging"
+	"github.com/mhollas/7610/oracle/pkg/consensus"
+	"github.com/mhollas/7610/oracle/pkg/logging"
 )
 
 // Recovery handles saving and restoring node state

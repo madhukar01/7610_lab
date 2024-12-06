@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"oracle/tests"
+	"github.com/mhollas/7610/oracle/tests"
 )
 
 func TestOracleNode(t *testing.T) {

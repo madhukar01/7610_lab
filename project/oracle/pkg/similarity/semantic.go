@@ -56,8 +56,8 @@ func (s *SemanticScorer) GetEmbedding(ctx context.Context, text string) ([]float
 	return resp.Data[0].Embedding, nil
 }
 
-// cosineSimilarity calculates the cosine similarity between two vectors
-func cosineSimilarity(a, b []float32) float32 {
+// CosineSimilarity calculates the cosine similarity between two vectors
+func CosineSimilarity(a, b []float32) float32 {
 	if len(a) != len(b) {
 		return 0
 	}
@@ -104,7 +104,7 @@ func (s *SemanticScorer) ClusterResponses(ctx context.Context, responses []*Resp
 				similarities[resp1.NodeID][resp2.NodeID] = 1.0
 				continue
 			}
-			sim := cosineSimilarity(embeddings[resp1.NodeID], embeddings[resp2.NodeID])
+			sim := CosineSimilarity(embeddings[resp1.NodeID], embeddings[resp2.NodeID])
 			similarities[resp1.NodeID][resp2.NodeID] = sim
 		}
 	}

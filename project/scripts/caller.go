@@ -53,16 +53,34 @@ func waitForResponse(client *ethclient.Client, contractABI abi.ABI, contractAddr
 	defer ticker.Stop()
 
 	timeout := time.After(60 * time.Second)
+	startBlock, err := client.BlockNumber(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to get current block number: %v", err)
+	}
+
+	var lastCheckedBlock uint64 = startBlock
 
 	for {
 		select {
 		case <-ticker.C:
+			currentBlock, err := client.BlockNumber(context.Background())
+			if err != nil {
+				log.Printf("Failed to get current block number: %v", err)
+				continue
+			}
+
+			if currentBlock == lastCheckedBlock {
+				continue
+			}
+
 			// Create filter for ResponseReceived events
 			query := ethereum.FilterQuery{
+				FromBlock: new(big.Int).SetUint64(lastCheckedBlock),
+				ToBlock:   new(big.Int).SetUint64(currentBlock),
 				Addresses: []common.Address{contractAddress},
 				Topics: [][]common.Hash{{
 					contractABI.Events["ResponseReceived"].ID,
-					requestID,
+					common.BytesToHash(requestID[:]),
 				}},
 			}
 
@@ -73,6 +91,7 @@ func waitForResponse(client *ethclient.Client, contractABI abi.ABI, contractAddr
 			}
 
 			for _, vLog := range logs {
+				// Response and IPFS CID are not indexed, so they're in the data
 				event := struct {
 					Response string
 					IpfsCid  string
@@ -80,18 +99,21 @@ func waitForResponse(client *ethclient.Client, contractABI abi.ABI, contractAddr
 
 				err = contractABI.UnpackIntoInterface(&event, "ResponseReceived", vLog.Data)
 				if err != nil {
-					log.Printf("Failed to decode event: %v", err)
+					log.Printf("Failed to decode event data: %v", err)
 					continue
 				}
 
-				log.Printf("\nResponse received:")
+				log.Printf("\nResponse received in block %d:", vLog.BlockNumber)
 				log.Printf("Response: %s", event.Response)
 				log.Printf("IPFS CID: %s", event.IpfsCid)
 				return nil
 			}
 
+			lastCheckedBlock = currentBlock
+			log.Printf("Checked blocks %d to %d... No response yet", lastCheckedBlock, currentBlock)
+
 		case <-timeout:
-			return fmt.Errorf("timeout waiting for response")
+			return fmt.Errorf("timeout waiting for response after %d blocks", lastCheckedBlock-startBlock)
 		}
 	}
 }
@@ -193,23 +215,26 @@ func main() {
 	// Check for events
 	if len(receipt.Logs) > 0 {
 		log.Printf("Events emitted: %d", len(receipt.Logs))
-		for i, vLog := range receipt.Logs {
-			log.Printf("Event %d:", i)
-			if len(vLog.Topics) > 0 {
+		for _, vLog := range receipt.Logs {
+			// Check if this is a RequestCreated event
+			if vLog.Topics[0] == contractABI.Events["RequestCreated"].ID {
+				// RequestID is indexed, so it's in the topics
+				copy(requestID[:], vLog.Topics[1].Bytes())
+
+				// Decode the non-indexed parameters
 				event := struct {
-					RequestID common.Hash
-					Requester common.Address
-					Prompt    string
+					Prompt string
 				}{}
+
 				err := contractABI.UnpackIntoInterface(&event, "RequestCreated", vLog.Data)
 				if err != nil {
-					log.Printf("Failed to decode event: %v", err)
+					log.Printf("Failed to decode event data: %v", err)
 					continue
 				}
-				log.Printf("  RequestID: %s", event.RequestID.Hex())
-				log.Printf("  Requester: %s", event.Requester.Hex())
-				log.Printf("  Prompt: %s", event.Prompt)
-				copy(requestID[:], event.RequestID[:])
+
+				log.Printf("\nRequest created:")
+				log.Printf("RequestID: %s", common.BytesToHash(requestID[:]).Hex())
+				log.Printf("Prompt: %s", event.Prompt)
 			}
 		}
 	} else {

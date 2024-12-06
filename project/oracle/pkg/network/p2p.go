@@ -381,3 +381,37 @@ func (t *P2PTransport) NodeID() string {
 	defer t.mu.RUnlock()
 	return t.nodeID
 }
+
+// ReadMessage reads a message from the connection
+func (t *P2PTransport) ReadMessage(conn net.Conn) (*Message, error) {
+	// Set read deadline
+	deadline := time.Now().Add(500 * time.Millisecond)
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		return nil, fmt.Errorf("failed to set read deadline: %w", err)
+	}
+
+	// Read message length
+	var length uint32
+	if err := binary.Read(conn, binary.BigEndian, &length); err != nil {
+		return nil, fmt.Errorf("failed to read message length: %w", err)
+	}
+
+	// Check message size
+	if int(length) > MaxMessageSize {
+		return nil, fmt.Errorf("message too large: %d > %d", length, MaxMessageSize)
+	}
+
+	// Read message data
+	data := make([]byte, length)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		return nil, fmt.Errorf("failed to read message data: %w", err)
+	}
+
+	// Parse message
+	var msg Message
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal message: %w", err)
+	}
+
+	return &msg, nil
+}

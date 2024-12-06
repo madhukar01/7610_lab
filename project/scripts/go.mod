@@ -1,11 +1,11 @@
-module scripts
+module github.com/mhollas/7610/scripts
 
 go 1.21
 
 require (
-	agent/src/llm v0.0.0-00010101000000-000000000000
-	config v0.0.0-00010101000000-000000000000
 	github.com/ethereum/go-ethereum v1.13.5
+	github.com/mhollas/7610/config v0.0.0-00010101000000-000000000000
+	github.com/mhollas/7610/oracle v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -25,8 +25,9 @@ require (
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/holiman/uint256 v1.2.3 // indirect
+	github.com/mhollas/7610/agent v0.0.0-00010101000000-000000000000 // indirect
 	github.com/mmcloughlin/addchain v0.4.0 // indirect
-	github.com/sashabaranov/go-openai v1.17.9 // indirect
+	github.com/sashabaranov/go-openai v1.36.0 // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
 	github.com/supranational/blst v0.3.11 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
@@ -41,6 +42,7 @@ require (
 )
 
 replace (
-	agent/src/llm => ../agent/src/llm
-	config => ../config
+	github.com/mhollas/7610/agent => ../agent
+	github.com/mhollas/7610/config => ../config
+	github.com/mhollas/7610/oracle => ../oracle
 )

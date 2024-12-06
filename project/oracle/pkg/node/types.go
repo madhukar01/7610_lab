@@ -1,10 +1,11 @@
 package node
 
 import (
-	"agent/src/llm"
-	"oracle/internal/consensus"
-	"oracle/internal/similarity"
 	"time"
+
+	"github.com/mhollas/7610/agent/llm"
+	"github.com/mhollas/7610/oracle/pkg/consensus"
+	"github.com/mhollas/7610/oracle/pkg/similarity"
 )
 
 // OracleRequest represents a request to the oracle network

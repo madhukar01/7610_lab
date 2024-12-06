@@ -35,6 +35,7 @@ func NewPBFT(nodeID string, nodes []string, timeout time.Duration) *PBFT {
 		f:                  (len(nodes) - 1) / 3,
 		checkpoints:        make(map[uint64][]byte),
 		checkpointInterval: 100,
+		consensusReached:   make(map[uint64]bool),
 	}
 
 	// Set initial leader (node0)
@@ -191,16 +192,36 @@ func (p *PBFT) handlePrepare(msg *ConsensusMessage) {
 		commit := &ConsensusMessage{
 			Type:     Commit,
 			NodeID:   p.nodeID,
+			View:     msg.View,
 			Sequence: msg.Sequence,
+			Digest:   msg.Digest,
 			Data:     msg.Data,
 		}
+
+		// Store commit message
+		if _, exists := p.commitMessages[msg.Sequence]; !exists {
+			p.commitMessages[msg.Sequence] = make(map[string]*ConsensusMessage)
+		}
+		p.commitMessages[msg.Sequence][p.nodeID] = commit
+
+		// Broadcast commit message
 		p.broadcast(commit)
+
+		// Check if we already have enough commit messages
+		if len(p.commitMessages[msg.Sequence]) >= 2*p.f+1 {
+			p.executeConsensus(msg.Sequence, msg.Data)
+		}
 	}
 }
 
 func (p *PBFT) handleCommit(msg *ConsensusMessage) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Skip if consensus already reached for this sequence
+	if p.consensusReached[msg.Sequence] {
+		return
+	}
 
 	// Initialize commit messages map for this sequence if needed
 	if _, exists := p.commitMessages[msg.Sequence]; !exists {
@@ -212,6 +233,8 @@ func (p *PBFT) handleCommit(msg *ConsensusMessage) {
 
 	// Check if we have enough commit messages
 	if len(p.commitMessages[msg.Sequence]) >= 2*p.f+1 {
+		// Mark consensus as reached for this sequence
+		p.consensusReached[msg.Sequence] = true
 		// Consensus reached!
 		p.executeConsensus(msg.Sequence, msg.Data)
 	}
@@ -425,6 +448,13 @@ func (p *PBFT) cleanup(sequence uint64) {
 	for seq := range p.commitMessages {
 		if seq < sequence {
 			delete(p.commitMessages, seq)
+		}
+	}
+
+	// Cleanup old consensus reached flags
+	for seq := range p.consensusReached {
+		if seq < sequence {
+			delete(p.consensusReached, seq)
 		}
 	}
 

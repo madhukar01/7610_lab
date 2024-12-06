@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"agent/src/llm"
-	"oracle/internal/consensus"
-	"oracle/internal/logging"
-	"oracle/internal/network"
-	"oracle/internal/similarity"
-	"oracle/internal/storage"
+	"github.com/mhollas/7610/agent/llm"
+	"github.com/mhollas/7610/oracle/pkg/consensus"
+	"github.com/mhollas/7610/oracle/pkg/logging"
+	"github.com/mhollas/7610/oracle/pkg/network"
+	"github.com/mhollas/7610/oracle/pkg/similarity"
+	"github.com/mhollas/7610/oracle/pkg/storage"
 )
 
 const (
@@ -91,38 +91,43 @@ func (n *OracleNode) ProcessPrompt(ctx context.Context, requestID string, prompt
 	}
 	n.requests[requestID] = state
 
-	// Only leader proposes values
+	// Get LLM response if client is available
+	if n.llmClient != nil {
+		req := &llm.LLMRequest{
+			Prompt:      prompt,
+			Temperature: 0.7,
+			RequestID:   requestID,
+			NodeID:      n.nodeID,
+			ExtraParams: map[string]interface{}{
+				"timestamp": time.Now(),
+			},
+		}
+		resp, err := n.llmClient.GetResponse(ctx, req)
+		if err != nil {
+			state.Status = "failed"
+			state.Error = err
+			return fmt.Errorf("failed to get LLM response: %w", err)
+		}
+
+		// Store response
+		state.LLMResponse = resp
+		state.Responses[n.nodeID] = resp
+		n.logger.Info("Generated LLM response", map[string]interface{}{
+			"response": resp.Text,
+		})
+	}
+
+	// Only leader proposes values for consensus
 	if !n.consensus.IsLeader() {
 		n.logger.Debug("Non-leader node waiting for consensus messages")
 		return nil
 	}
 
-	// Get LLM response
-	req := &llm.LLMRequest{
-		Prompt:      prompt,
-		Temperature: 0.7,
-		RequestID:   requestID,
-		NodeID:      n.nodeID,
-		ExtraParams: map[string]interface{}{
-			"timestamp": time.Now(),
-		},
-	}
-	resp, err := n.llmClient.GetResponse(ctx, req)
-	if err != nil {
-		state.Status = "failed"
-		state.Error = err
-		return fmt.Errorf("failed to get LLM response: %w", err)
-	}
-
-	// Store response
-	state.LLMResponse = resp
-	state.Responses[n.nodeID] = resp
-
 	// Create consensus data
 	consensusData := &consensus.ConsensusData{
 		RequestID: requestID,
 		NodeID:    n.nodeID,
-		Response:  resp,
+		Response:  state.LLMResponse,
 		Timestamp: time.Now(),
 	}
 
@@ -166,19 +171,23 @@ func (n *OracleNode) handleConsensusResult(result consensus.ConsensusResult) {
 	state.Status = "complete"
 	state.ConsensusData = &consensusData
 
-	// Store response if not already present
-	if _, exists := state.Responses[consensusData.NodeID]; !exists {
-		state.Responses[consensusData.NodeID] = consensusData.Response
+	// Store response if not already present and valid
+	if consensusData.Response != nil {
+		if _, exists := state.Responses[consensusData.NodeID]; !exists {
+			state.Responses[consensusData.NodeID] = consensusData.Response
+		}
 	}
 
-	// Perform semantic clustering
-	if len(state.Responses) > 0 {
+	// Only perform semantic clustering if this node has a scorer (leader node)
+	if n.scorer != nil && len(state.Responses) > 0 {
 		responses := make([]*similarity.Response, 0, len(state.Responses))
 		for _, resp := range state.Responses {
-			responses = append(responses, &similarity.Response{
-				NodeID: resp.NodeID,
-				Text:   resp.Text,
-			})
+			if resp != nil {
+				responses = append(responses, &similarity.Response{
+					NodeID: resp.NodeID,
+					Text:   resp.Text,
+				})
+			}
 		}
 
 		clusters, err := n.scorer.ClusterResponses(context.Background(), responses, 0.85)
@@ -189,19 +198,65 @@ func (n *OracleNode) handleConsensusResult(result consensus.ConsensusResult) {
 		}
 	}
 
-	// Store final result in IPFS
-	record := &storage.ExecutionRecord{
-		RequestID:     consensusData.RequestID,
-		RequestInput:  state.Prompt,
-		Timestamp:     time.Now(),
-		FinalResponse: consensusData.Response.Text,
-	}
+	// Only store final result in IPFS if this node has storage capabilities (leader node)
+	if n.storage != nil {
+		// Create oracle responses array
+		oracleResponses := make([]storage.OracleResponse, 0, len(state.Responses))
+		for nodeID, resp := range state.Responses {
+			if resp != nil {
+				oracleResponses = append(oracleResponses, storage.OracleResponse{
+					NodeID:      nodeID,
+					LLMResponse: resp.Text,
+					Timestamp:   resp.Timestamp,
+					Metadata:    resp.ExtraParams,
+				})
+			}
+		}
 
-	cid, err := n.storage.StoreExecutionRecord(context.Background(), record)
-	if err != nil {
-		n.logger.Error("Failed to store result:", err)
-	} else {
-		state.IPFSCID = cid
+		// Create consensus data
+		consensusInfo := storage.ConsensusData{
+			Method:           "PBFT",
+			ParticipantCount: len(state.Responses),
+			AgreementScore:   1.0, // PBFT guarantees agreement
+			Round:            1,
+		}
+
+		// Get final response text - use leader's response if available
+		var finalResponse string
+		if state.LLMResponse != nil {
+			finalResponse = state.LLMResponse.Text
+		} else if consensusData.Response != nil {
+			finalResponse = consensusData.Response.Text
+		} else if len(state.Responses) > 0 {
+			// Fallback to first available response
+			for _, resp := range state.Responses {
+				if resp != nil {
+					finalResponse = resp.Text
+					break
+				}
+			}
+		}
+
+		if finalResponse == "" {
+			n.logger.Error("No valid response found for storage")
+			return
+		}
+
+		record := &storage.ExecutionRecord{
+			RequestID:       state.RequestID,
+			RequestInput:    state.Prompt,
+			Timestamp:       time.Now(),
+			FinalResponse:   finalResponse,
+			OracleResponses: oracleResponses,
+			Consensus:       consensusInfo,
+		}
+
+		cid, err := n.storage.StoreExecutionRecord(context.Background(), record)
+		if err != nil {
+			n.logger.Error("Failed to store result:", err)
+		} else {
+			state.IPFSCID = cid
+		}
 	}
 }
 
@@ -348,4 +403,25 @@ func (n *OracleNode) GetMessageCallback() func(*consensus.ConsensusMessage) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.messageCallback
+}
+
+// SetTransport sets the network transport for the node
+func (n *OracleNode) SetTransport(transport network.Transport) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.networkTransport = transport
+}
+
+// GetConsensus returns the node's consensus engine
+func (n *OracleNode) GetConsensus() *consensus.PBFT {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.consensus
+}
+
+// GetStorage returns the node's storage client
+func (n *OracleNode) GetStorage() storage.StorageClient {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.storage
 }

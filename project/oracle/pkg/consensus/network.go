@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"oracle/internal/network"
+	"github.com/mhollas/7610/oracle/pkg/network"
 )
 
 // NetworkManager handles network communication for PBFT
