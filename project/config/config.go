@@ -42,11 +42,13 @@ type GlobalConfig struct {
 	} `json:"llm"`
 
 	Blockchain struct {
-		Network         string `json:"network"`
-		RPCURL          string `json:"rpc_url"`
-		ContractAddress string `json:"contract_address"`
-		GasLimit        int    `json:"gas_limit"`
-		Confirmations   int    `json:"confirmations"`
+		Network          string `json:"network"`
+		RPCURL           string `json:"rpc_url"`
+		ChainID          int    `json:"chain_id"`
+		ContractAddress  string `json:"contract_address"`
+		OraclePrivateKey string `json:"oracle_private_key"`
+		GasLimit         int    `json:"gas_limit"`
+		Confirmations    int    `json:"confirmations"`
 	} `json:"blockchain"`
 
 	Logging struct {
