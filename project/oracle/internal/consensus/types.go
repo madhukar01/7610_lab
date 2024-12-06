@@ -1,108 +1,122 @@
 package consensus
 
 import (
-	"context"
+	"agent/src/llm"
+	"crypto/ecdsa"
 	"sync"
 	"time"
 )
 
-// ConsensusMessage represents a message in the PBFT consensus
-type ConsensusMessage struct {
-	Type     MessageType
-	NodeID   string
-	View     uint64
-	Sequence uint64
-	Digest   []byte
-	Data     []byte
-}
-
-// Update the PBFTState definition
-type PBFTState string
+// MessageType represents the type of consensus message
+type MessageType int
 
 const (
-	// PBFT States
-	StateNone       PBFTState = "NONE"
-	StatePrePrepare PBFTState = "PRE-PREPARE"
-	StatePrepare    PBFTState = "PREPARE"
-	StateCommit     PBFTState = "COMMIT"
-	StateFinalized  PBFTState = "FINALIZED"
-
-	// Additional states for view changes
-	StateViewChange PBFTState = "VIEW-CHANGE"
-	StateNormal     PBFTState = "NORMAL"
-)
-
-const (
-	// Message Types
 	PrePrepare MessageType = iota
 	Prepare
 	Commit
 	ViewChange
 	NewView
+	StateTransfer
 )
 
-type MessageType int
+// ConsensusMessage represents a message in the consensus protocol
+type ConsensusMessage struct {
+	Type     MessageType `json:"type"`
+	NodeID   string      `json:"node_id"`
+	View     uint64      `json:"view"`
+	Sequence uint64      `json:"sequence"`
+	Digest   []byte      `json:"digest"`
+	Data     []byte      `json:"data"`
+}
 
-type ViewChangeData struct {
-	NewView    uint64
-	LastSeq    uint64
-	Checkpoint []byte
+// ConsensusData represents the data being agreed upon
+type ConsensusData struct {
+	RequestID string           `json:"request_id"`
+	NodeID    string           `json:"node_id"`
+	Response  *llm.LLMResponse `json:"response"`
+	Timestamp time.Time        `json:"timestamp"`
 }
 
 // ConsensusResult represents the result of consensus
 type ConsensusResult struct {
-	Sequence uint64
-	Data     []byte
-	Digest   []byte
+	Sequence uint64 `json:"sequence"`
+	Data     []byte `json:"data"`
+	Digest   []byte `json:"digest"`
 }
 
-// ConsensusEngine defines the interface for consensus operations
-type ConsensusEngine interface {
-	// Start starts the consensus engine
-	Start(ctx context.Context) error
+// NodeState represents the state of a PBFT node
+type NodeState int
 
-	// Stop stops the consensus engine
-	Stop() error
+const (
+	StateNormal NodeState = iota
+	StateViewChange
+)
 
-	// ProcessMessage processes an incoming consensus message
-	ProcessMessage(msg *ConsensusMessage) error
-
-	// ProposeValue proposes a new value for consensus
-	ProposeValue(value []byte) error
-
-	// RegisterResultCallback registers a callback for consensus results
-	RegisterResultCallback(func(ConsensusResult))
+// ViewChangeMessage represents a view change message
+type ViewChangeMessage struct {
+	NodeID       string            `json:"node_id"`
+	NewView      uint64            `json:"new_view"`
+	LastSequence uint64            `json:"last_sequence"`
+	Checkpoints  map[uint64][]byte `json:"checkpoints"`
+	PrepareProof map[uint64][]byte `json:"prepare_proof"`
 }
 
-// PBFT represents the PBFT consensus engine
+// NewViewMessage represents a new view message
+type NewViewMessage struct {
+	NodeID      string              `json:"node_id"`
+	View        uint64              `json:"view"`
+	ViewChanges []ViewChangeMessage `json:"view_changes"`
+	NewSequence uint64              `json:"new_sequence"`
+}
+
+// ViewChangeData contains data for view change messages
+type ViewChangeData struct {
+	NewView    uint64 `json:"new_view"`
+	LastSeq    uint64 `json:"last_seq"`
+	Checkpoint []byte `json:"checkpoint"`
+}
+
+// CheckpointProof represents a proof of a checkpoint
+type CheckpointProof struct {
+	Sequence   uint64            `json:"sequence"`
+	Digest     []byte            `json:"digest"`
+	State      []byte            `json:"state"`
+	Signatures map[string][]byte `json:"signatures"`
+}
+
+// PBFT represents a PBFT consensus instance
 type PBFT struct {
-	mu       sync.RWMutex
-	nodeID   string
-	view     uint64 // Current view number
-	sequence uint64 // Sequence number for consensus
-	state    PBFTState
-	isLeader bool
+	mu                 sync.RWMutex
+	nodeID             string
+	nodes              []string
+	privateKey         *ecdsa.PrivateKey
+	networkManager     *NetworkManager
+	timeout            time.Duration
+	viewChangeTimeout  time.Duration
+	checkpointInterval uint64
 
-	// Consensus state
+	// State
+	view              uint64
+	sequence          uint64
+	state             NodeState
+	isLeader          bool
+	lastCheckpoint    []byte
+	lastCheckpointSeq uint64
+
+	// Messages
 	prepareMessages map[uint64]map[string]*ConsensusMessage
 	commitMessages  map[uint64]map[string]*ConsensusMessage
+	viewChangeMsgs  map[uint64]map[string]*ConsensusMessage
+	checkpoints     map[uint64][]byte
 
-	// Channels for message handling
+	// Channels
 	msgChan  chan *ConsensusMessage
 	doneChan chan struct{}
 
-	// Configuration
-	nodes   []string // List of node IDs
-	f       int      // Byzantine fault tolerance (n-1)/3
-	timeout time.Duration
+	// Callbacks
+	resultCallback func(ConsensusResult)
 
-	viewChangeTimeout  time.Duration
-	viewChangeMsgs     map[uint64]map[string]*ConsensusMessage
-	lastCheckpoint     []byte
-	viewTimer          *time.Timer
-	checkpointInterval uint64
-	lastCheckpointSeq  uint64
-	checkpoints        map[uint64][]byte
-	resultCallback     func(ConsensusResult)
-	networkManager     *NetworkManager
+	// Configuration
+	f         int // Byzantine fault tolerance (n-1)/3
+	viewTimer *time.Timer
 }
