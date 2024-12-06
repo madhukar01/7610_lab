@@ -1,0 +1,14 @@
+1. Oracle Node (Go):
+Basic node setup
+PBFT consensus framework
+Network communication
+
+2. LLM Agent (Python):
+API service setup
+LLM integration
+
+3. Response processing
+Smart Contracts:
+Oracle interface
+Request handling
+Response storage
