@@ -31,9 +31,8 @@ type OracleRequest struct {
 
 // OracleResponse represents a response from the oracle network
 type OracleResponse struct {
-	RequestID string `json:"request_id"`
-	Response  string `json:"response"`
-	Error     string `json:"error,omitempty"`
+	IPFSCID string `json:"ipfs_cid"`
+	Error   string `json:"error,omitempty"`
 }
 
 // ContractMetadata represents the metadata for the contract
@@ -109,15 +108,17 @@ func sendToOracle(ctx context.Context, logger *logging.Logger, requestID string,
 	}
 
 	// Send to oracle leader (node0)
-	url := "http://localhost:3000/request"
+	url := "http://localhost:8080/prompt"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(reqData)))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Make request
-	client := &http.Client{Timeout: 30 * time.Second}
+	// Make request with no timeout
+	client := &http.Client{
+		Timeout: 0, // No timeout
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("failed to send request: %w", err)
@@ -140,7 +141,11 @@ func sendToOracle(ctx context.Context, logger *logging.Logger, requestID string,
 		return "", fmt.Errorf("oracle error: %s", oracleResp.Error)
 	}
 
-	return oracleResp.Response, nil
+	// Log the IPFS CID
+	logger.Info(fmt.Sprintf("\n=== Oracle Response ===\nRequest ID: %s\nIPFS CID: %s\n====================\n",
+		requestID, oracleResp.IPFSCID))
+
+	return oracleResp.IPFSCID, nil
 }
 
 func monitorBlockchain(ctx context.Context, cfg *config.GlobalConfig, logger *logging.Logger, client *ethclient.Client, contractABI abi.ABI, privateKey string) {
@@ -190,9 +195,12 @@ func monitorBlockchain(ctx context.Context, cfg *config.GlobalConfig, logger *lo
 				continue
 			}
 
-			// Always log block check
-			logger.Info(fmt.Sprintf("Checked blocks %d to %d (range: %d blocks, events: %d)",
-				lastBlock+1, currentBlock, currentBlock-lastBlock, len(logs)))
+			// Log block check every 10 blocks
+			blockRange := currentBlock - lastBlock
+			if blockRange >= 10 {
+				logger.Info(fmt.Sprintf("Checked blocks %d to %d (range: %d blocks, events: %d)",
+					lastBlock+1, currentBlock, blockRange, len(logs)))
+			}
 
 			// Process logs
 			for _, vLog := range logs {
@@ -235,7 +243,7 @@ func monitorBlockchain(ctx context.Context, cfg *config.GlobalConfig, logger *lo
 				contract := bind.NewBoundContract(contractAddr, contractABI, client, client, client)
 
 				// Submit response
-				tx, err := contract.Transact(auth, "submitResponse", requestID, response, "")
+				tx, err := contract.Transact(auth, "submitResponse", requestID, response, response)
 				if err != nil {
 					logger.Error(fmt.Sprintf("Failed to submit response: %v", err))
 					continue
