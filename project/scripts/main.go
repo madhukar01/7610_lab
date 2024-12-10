@@ -197,10 +197,8 @@ func monitorBlockchain(ctx context.Context, cfg *config.GlobalConfig, logger *lo
 
 			// Log block check every 10 blocks
 			blockRange := currentBlock - lastBlock
-			if blockRange >= 10 {
-				logger.Info(fmt.Sprintf("Checked blocks %d to %d (range: %d blocks, events: %d)",
-					lastBlock+1, currentBlock, blockRange, len(logs)))
-			}
+			logger.Info(fmt.Sprintf("Checked blocks %d to %d (range: %d blocks, events: %d)",
+				lastBlock+1, currentBlock, blockRange, len(logs)))
 
 			// Process logs
 			for _, vLog := range logs {

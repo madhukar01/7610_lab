@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"math/big"
@@ -52,7 +53,7 @@ func waitForResponse(client *ethclient.Client, contractABI abi.ABI, contractAddr
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	timeout := time.After(60 * time.Second)
+	timeout := time.After(300 * time.Second)
 	startBlock, err := client.BlockNumber(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to get current block number: %v", err)
@@ -119,6 +120,15 @@ func waitForResponse(client *ethclient.Client, contractABI abi.ABI, contractAddr
 }
 
 func main() {
+
+	// Add flag parsing
+	prompt := flag.String("prompt", "", "Tell me a short poem about Northeastern University.")
+	flag.Parse()
+
+	if *prompt == "" {
+		log.Fatal("Please provide a prompt using -prompt flag")
+	}
+
 	// Load config
 	cfg, err := loadConfig()
 	if err != nil {
@@ -167,7 +177,6 @@ func main() {
 	}
 
 	// Prepare transaction data
-	prompt := "What is the meaning of life?"
 	data, err := contractABI.Pack("createRequest", prompt)
 	if err != nil {
 		log.Fatalf("Failed to pack data: %v", err)

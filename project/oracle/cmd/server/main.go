@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -18,9 +19,9 @@ import (
 )
 
 var (
-	nodes []*node.OracleNode
+	nodes          []*node.OracleNode
 	requestCounter = 0
-	appConfig *Config
+	appConfig      *Config
 )
 
 type Config struct {
@@ -57,10 +58,24 @@ type pbftMessage struct {
 }
 
 func main() {
-	// Read config file - same as test
-	configFile, err := os.ReadFile("../../config/config.json")
+	// Parse command line flags
+	configPath := flag.String("config", "", "Absolute path to config file (required)")
+	flag.Parse()
+
+	// Validate config path
+	if *configPath == "" {
+		log.Fatal("Config path is required. Use -config flag to specify the absolute path to config file.")
+	}
+
+	// // Check if path is absolute
+	// if !filepath.IsAbs(*configPath) {
+	// 	log.Fatal("Config path must be absolute. Current path is relative:", *configPath)
+	// }
+
+	// Read config file from specified path
+	configFile, err := os.ReadFile(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to read config file: %v", err)
+		log.Fatalf("Failed to read config file from %s: %v", *configPath, err)
 	}
 
 	appConfig = &Config{}
