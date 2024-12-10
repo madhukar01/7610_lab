@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/big"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -107,6 +109,9 @@ func waitForResponse(client *ethclient.Client, contractABI abi.ABI, contractAddr
 				log.Printf("\nResponse received in block %d:", vLog.BlockNumber)
 				log.Printf("Response: %s", event.Response)
 				log.Printf("IPFS CID: %s", event.IpfsCid)
+				if err := fetchIPFSData(event.IpfsCid); err != nil {
+					log.Printf("Error fetching IPFS data: %v", err)
+				}
 				return nil
 			}
 
@@ -117,6 +122,36 @@ func waitForResponse(client *ethclient.Client, contractABI abi.ABI, contractAddr
 			return fmt.Errorf("timeout waiting for response after %d blocks", lastCheckedBlock-startBlock)
 		}
 	}
+}
+
+// Add new function to fetch and display IPFS data
+func fetchIPFSData(ipfsCid string) error {
+	url := fmt.Sprintf("https://ipfs.io/ipfs/%s", ipfsCid)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to fetch IPFS data: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Pretty print JSON
+	var prettyJSON map[string]interface{}
+	if err := json.Unmarshal(body, &prettyJSON); err != nil {
+		return fmt.Errorf("failed to parse JSON: %v", err)
+	}
+
+	prettyData, err := json.MarshalIndent(prettyJSON, "", "    ")
+	if err != nil {
+		return fmt.Errorf("failed to format JSON: %v", err)
+	}
+
+	log.Printf("\nIPFS Data:\n%s", string(prettyData))
+	return nil
 }
 
 func main() {
