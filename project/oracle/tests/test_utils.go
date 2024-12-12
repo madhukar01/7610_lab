@@ -119,13 +119,13 @@ func CreateTestNode(nodeID string, peers []string) (*TestNode, error) {
 
 	// Create LLM client
 	cfg := &llm.Config{
-		Model:              "gpt-4-1106-preview",
+		Model:              "gpt-4o-mini",
 		MaxTokens:          1000,
 		DefaultTemperature: 0.7,
 		MaxRetries:         3,
 		RetryIntervalMs:    1000,
 	}
-	llmClient, err := llm.NewOpenAIClient("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", cfg)
+	llmClient, err := llm.NewOpenAIClient("", cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create LLM client: %w", err)
 	}
@@ -134,7 +134,7 @@ func CreateTestNode(nodeID string, peers []string) (*TestNode, error) {
 	storageClient := NewMockStorageClient()
 
 	// Create semantic scorer
-	scorer := similarity.NewSemanticScorer("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", "")
+	scorer := similarity.NewSemanticScorer("", "")
 
 	// Create node
 	n, err := node.NewOracleNode(nodeID, addr, llmClient, storageClient, scorer, logger)
